@@ -17,6 +17,7 @@ import {
   rebaseOnto,
   resolveBlockers,
   stackNote,
+  withoutStackNote,
 } from "../src/stack.ts";
 
 const config = {
@@ -330,4 +331,12 @@ test("worktreeHolding finds the worktree a branch is checked out in", () => {
   ].join("\n");
   expect(worktreeHolding(porcelain, "agent/3")).toBe("/repo/.sandcastle/worktrees/agent-3");
   expect(worktreeHolding(porcelain, "agent/30")).toBeUndefined();
+});
+
+test("withoutStackNote removes the stacking line a PR body starts with, and nothing else", () => {
+  const note = stackNote({ issue: "3", branch: "agent/3", pr: "40", sha: "abc" });
+  expect(withoutStackNote(`${note}\n\nCloses #4\n\nStacked on #9 in prose.`)).toBe(
+    "Closes #4\n\nStacked on #9 in prose.",
+  );
+  expect(withoutStackNote("Closes #4")).toBe("Closes #4");
 });

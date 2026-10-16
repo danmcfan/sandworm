@@ -13,6 +13,7 @@ import {
   Skip,
   stackNote,
   tipOf,
+  withoutStackNote,
   type Parent,
 } from "./stack.ts";
 import type { Tui } from "./tui.ts";
@@ -303,7 +304,12 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
       await save();
       if (published) {
         await $`git push -q --force-with-lease origin ${branch}`.cwd(worktree).quiet();
-        await $`gh pr edit ${progress.url ?? branch} --base main`.cwd(worktree).quiet();
+        // The PR now goes into main, so the "Stacked on" line is no longer true.
+        const pr = progress.url ?? branch;
+        const text = (await $`gh pr view ${pr} --json body --jq .body`.quiet().text()).trimEnd();
+        const file = `${out}/pipeline/pr-body-restacked.md`;
+        await Bun.write(file, withoutStackNote(text));
+        await $`gh pr edit ${pr} --base main --body-file ${file}`.cwd(worktree).quiet();
       }
       tui.activity(`restacked onto main; PR #${parent.pr} merged`);
     } else if (state === "OPEN" && head !== parent.sha) {
@@ -419,7 +425,7 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
     if (progress.parent !== undefined) {
       const text = await Bun.file(body).text();
       const note = stackNote(progress.parent, progress.alsoConflicts);
-      if (!text.startsWith(note)) await Bun.write(body, `${note}\n\n${text.replace(/^Stacked on #.*\n\n/u, "")}`);
+      if (!text.startsWith(note)) await Bun.write(body, `${note}\n\n${withoutStackNote(text)}`);
     }
     // An audit can end with only follow-up issues and no commits, and GitHub refuses a PR with no
     // commits, so the PR body goes on the issue as a comment instead.

@@ -348,6 +348,11 @@ export function isParent(value: unknown): value is Parent {
   return ["issue", "branch", "pr", "sha"].every((key) => typeof Reflect.get(value, key) === "string");
 }
 
+/** A PR body without the stackNote line it starts with, for a PR restacked onto main or re-noted. */
+export function withoutStackNote(body: string): string {
+  return body.replace(/^Stacked on #\d+[^\n]*\n+/u, "");
+}
+
 interface ListedPr {
   number: number;
   headRefName: string;
