@@ -40,6 +40,8 @@ export interface Config {
      * latest origin/main. Defaults to false: every issue stops at an open PR.
      */
     mergeBugs?: boolean;
+    /** Issues carrying any of these labels wait for the owner and are left out. Defaults to ["needs-owner"]. */
+    skipLabels?: string[];
   };
   /**
    * Stacking a branch on another issue's open PR (see GLOSSARY.md). `blockers`: cut the branch from
@@ -61,6 +63,7 @@ export interface Resolved {
   workers: number;
   mergeBugs: boolean;
   stack: { blockers: boolean; conflicts: boolean };
+  skipLabels: string[];
   gates: GateRule[];
   /** The prompt args every prompt may use. */
   args: Record<string, string>;
@@ -80,6 +83,7 @@ export function resolve(config: Config): Resolved {
     workers: config.batch?.workers ?? 1,
     mergeBugs: config.batch?.mergeBugs ?? false,
     stack: { blockers: config.stack?.blockers ?? true, conflicts: config.stack?.conflicts ?? true },
+    skipLabels: config.batch?.skipLabels ?? ["needs-owner"],
     gates: config.gates ?? [],
     args: {
       REPO: config.repo,
