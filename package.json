@@ -1,6 +1,6 @@
 {
   "name": "sandworm",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "The Sandcastle issue → PR pipeline shared by danmcfan's repos.",
   "type": "module",
   "repository": "github:danmcfan/sandworm",
