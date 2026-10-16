@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import type { GateRule } from "./gate.ts";
 
 /** What a repo tells the pipeline about itself, in `.sandcastle/config.ts`. */
 export interface Config {
@@ -26,6 +27,11 @@ export interface Config {
     /** The directory the PR agent picks screenshots and videos from, e.g. "out/verify". */
     evidence: string;
   };
+  /**
+   * The repo's own gate rules, run after the built-in ones on the same artefacts. Their failures
+   * fail the run like any other. Defaults to [].
+   */
+  gates?: GateRule[];
   batch?: {
     /** Issues run at once. Defaults to 1. */
     workers?: number;
@@ -55,6 +61,7 @@ export interface Resolved {
   workers: number;
   mergeBugs: boolean;
   stack: { blockers: boolean; conflicts: boolean };
+  gates: GateRule[];
   /** The prompt args every prompt may use. */
   args: Record<string, string>;
 }
@@ -73,6 +80,7 @@ export function resolve(config: Config): Resolved {
     workers: config.batch?.workers ?? 1,
     mergeBugs: config.batch?.mergeBugs ?? false,
     stack: { blockers: config.stack?.blockers ?? true, conflicts: config.stack?.conflicts ?? true },
+    gates: config.gates ?? [],
     args: {
       REPO: config.repo,
       BASE: compare,

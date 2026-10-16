@@ -435,20 +435,25 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
     await step("pr", "pr", SONNET, "pr.md", { CHECK: green ? "passing" : "FAILING" });
   });
 
-  await phase("gate", "won't-fix, follow-ups, evidence, commits", async () => {
-    const failures = gate(
-      // A stacked branch's commits are counted from its parent, as the prompts see them.
-      await artefacts(worktree, issue, stackedOn() ?? config.compare, config.args["EVIDENCE"] ?? ""),
-    );
-    if (failures.length === 0) {
-      delete progress.gated;
-      return;
-    }
-    await Bun.write(`${out}/pipeline/gate.md`, `${report(failures)}\n`);
-    progress = rewind(progress);
-    await saveAll();
-    throw new Error(`the gate failed; no PR opened. Rerun to fix:\n${report(failures)}`);
-  });
+  await phase(
+    "gate",
+    "won't-fix, follow-ups, evidence, commits" + (config.gates.length > 0 ? ", repo rules" : ""),
+    async () => {
+      const failures = await gate(
+        // A stacked branch's commits are counted from its parent, as the prompts see them.
+        await artefacts(worktree, issue, stackedOn() ?? config.compare, config.args["EVIDENCE"] ?? ""),
+        config.gates,
+      );
+      if (failures.length === 0) {
+        delete progress.gated;
+        return;
+      }
+      await Bun.write(`${out}/pipeline/gate.md`, `${report(failures)}\n`);
+      progress = rewind(progress);
+      await saveAll();
+      throw new Error(`the gate failed; no PR opened. Rerun to fix:\n${report(failures)}`);
+    },
+  );
 
   enter("publish");
   if (progress.done.includes("publish")) tui.skip("publish", progress.url ?? "");

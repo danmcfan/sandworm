@@ -1,6 +1,6 @@
 import type { Progress } from "./pipeline.ts";
 
-// The gate between the PR body and publish: fixed rules the run's own outputs must keep. A run
+// The gate between the PR body and publish: built-in rules plus the repo's own `gates` that the run's own outputs must keep. A run
 // that breaks one stops without publishing, and its rerun goes back to fix with the failures.
 
 /** What a run left behind, read from the worktree and `gh`. */
@@ -89,9 +89,20 @@ function foreignCommit({ commits, issue }: RunArtefacts): GateFailure[] {
 
 const RULES = [prSpec, wontFixIssue, followUpLink, evidence, foreignCommit];
 
-/** Every rule the run's outputs break; none means it may publish. */
-export function gate(artefacts: RunArtefacts): GateFailure[] {
-  return RULES.flatMap((rule) => rule(artefacts));
+/** A gate rule: the failures it finds in the run's outputs. A repo adds its own through `gates`. */
+export type GateRule = (artefacts: RunArtefacts) => GateFailure[] | Promise<GateFailure[]>;
+
+/** Every rule the run's outputs break, built-in then the repo's own; none means it may publish. */
+export async function gate(artefacts: RunArtefacts, repoRules: GateRule[] = []): Promise<GateFailure[]> {
+  const failures = RULES.flatMap((rule) => rule(artefacts));
+  for (const [i, rule] of repoRules.entries()) {
+    try {
+      failures.push(...(await rule(artefacts)));
+    } catch (err) {
+      failures.push({ rule: "repo-rule", message: `rule ${i} threw: ${err}` });
+    }
+  }
+  return failures;
 }
 
 /** gate.md and error.log: one failure per line, with the rule it broke. */
