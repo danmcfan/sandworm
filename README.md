@@ -3,7 +3,7 @@
 The [Sandcastle](https://github.com/ai-hero/sandcastle) pipeline shared by danmcfan's repos: one issue in, one PR out.
 
 ```
-feedback → setup → implement (Opus) → review (Opus) → fix (Sonnet) → check, refixing up to 3× → PR body (Sonnet) → publish
+feedback → setup → implement (Opus) → review (Opus) → fix (Sonnet) → check, refixing up to 3× → PR body (Sonnet) → gate → publish
 ```
 
 A repo runs it with `bun run sandcastle [issue] [--fresh]`, or over many issues with
@@ -65,6 +65,12 @@ The implement agent stops, rather than building on another agent's unmerged bran
 `out/pipeline/blocked.md`; the run then fails with its reason.
 
 ## When a run fails
+
+The gate checks the run's outputs before publish: each won't-fix Spec finding names an issue that
+exists (or says the finding is wrong), each `## Follow-ups` entry links an issue, every evidence path
+in the PR body is on disk and in `pr.json`'s `attach`, and no commit subject names another issue.
+A failure opens no PR; the failures are in `out/pipeline/gate.md` and `error.log`, and a rerun
+restarts at fix with them as its task.
 
 Each issue's logs are in `.sandcastle/logs/<issue>/`: one log per agent session, `state.json`
 (the steps done, and under `failed` the step and error that ended the last run), and
