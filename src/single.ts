@@ -2,11 +2,16 @@ import { $ } from "bun";
 import { resolve, type Config } from "./config.ts";
 import { describe, guard } from "./journal.ts";
 import { containers, logsFor, outcome, runIssue, STEPS, usageReport, type IssueRun } from "./pipeline.ts";
+import { exempt, Skip } from "./stack.ts";
 import { createTui } from "./tui.ts";
 
 /**
  * `bun run sandcastle [issue-number] [--fresh]`: one issue through the pipeline. With no number it
  * takes the lowest-numbered open ready-for-agent issue.
+ *
+ * An issue blocked by another issue with an open PR is stacked on that PR (see src/stack.ts); one
+ * blocked by an issue with no PR yet is skipped, saying why. Under mergeBugs a bug is cut from
+ * origin/main and never stacked, as in a batch.
  *
  * The terminal shows a progress view. Ctrl-C stops the agent and removes the container; a second
  * Ctrl-C force-removes it and quits. Running the same issue again carries on where it stopped.
@@ -22,6 +27,8 @@ export async function runSingle(config: Config, args = process.argv.slice(2)): P
   if (issue === "") throw new Error("No open ready-for-agent issue; pass an issue number.");
   if (!/^\d+$/u.test(issue)) throw new Error(`Not an issue number: ${issue}.`);
 
+  const view: unknown = resolved.mergeBugs ? await $`gh issue view ${issue} --json labels`.quiet().json() : {};
+  const bug = exempt(resolved, labelsOf(view));
   const logs = logsFor(issue);
   const runs: IssueRun["runs"] = [];
   const tui = createTui(`Sandcastle · issue #${issue} · ${resolved.branch(issue)}`, STEPS);
@@ -52,6 +59,7 @@ export async function runSingle(config: Config, args = process.argv.slice(2)): P
     const progress = await runIssue({
       config: resolved,
       issue,
+      ...(bug ? { base: "origin/main", bug } : {}),
       fresh,
       reporter: tui,
       signal: stop.signal,
@@ -65,6 +73,12 @@ export async function runSingle(config: Config, args = process.argv.slice(2)): P
   } catch (error) {
     // runIssue has written the error and its stack to error.log.
     finished();
+    if (error instanceof Skip) {
+      tui.stop(current, "skipped");
+      tui.close([`Skipped #${issue}: ${error.message}`, `Logs: ${logs}/`]);
+      process.exitCode = 1;
+      return;
+    }
     if (!stop.signal.aborted) {
       tui.fail(current, "failed");
       tui.close([
@@ -86,4 +100,12 @@ export async function runSingle(config: Config, args = process.argv.slice(2)): P
     ]);
     process.exitCode = 130;
   }
+}
+
+function labelsOf(view: unknown): { name: string }[] {
+  if (typeof view !== "object" || view === null || !("labels" in view) || !Array.isArray(view.labels)) return [];
+  return view.labels.filter(
+    (label: unknown): label is { name: string } =>
+      typeof label === "object" && label !== null && "name" in label && typeof label.name === "string",
+  );
 }

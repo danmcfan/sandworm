@@ -3,7 +3,7 @@
 The [Sandcastle](https://github.com/ai-hero/sandcastle) pipeline shared by danmcfan's repos: one issue in, one PR out.
 
 ```
-feedback → setup → implement (Opus) → review (Opus) → fix (Sonnet) → check, refixing up to 3× → PR body (Sonnet) → gate → publish
+feedback → setup → implement (Opus) → review (Opus) → fix (Sonnet) → check, refixing up to 3× → stack → PR body (Sonnet) → gate → publish
 ```
 
 A repo runs it with `bun run sandcastle [issue] [--fresh]`, or over many issues with
@@ -32,6 +32,7 @@ export default defineConfig({
     evidence: "out/verify",
   },
   batch: { workers: 2, mergeBugs: true }, // skipLabels: ["needs-owner"], the default
+  // stack: { blockers: true, conflicts: true },   // the default; false for either turns it off
 });
 ```
 
@@ -54,15 +55,39 @@ await runBatch(config);
 and `"sandcastle": "bun .sandcastle/main.ts"`, `"sandcastle:batch": "bun .sandcastle/batch.ts"` in `package.json`.
 The repo keeps its own `Dockerfile`, `.env` (from `.env.example`) and `.gitignore` (`.env`, `logs/`, `worktrees/`) in `.sandcastle/`.
 
+### Stacked PRs
+
+An issue can build on another issue's PR before the owner merges it (the words are in
+[GLOSSARY.md](GLOSSARY.md)):
+
+- **Blocked-by links.** If GitHub says issue B is blocked by issue A (its native issue
+  dependencies, not text in the body) and A has an open PR, B's branch is cut from A's branch and
+  B's PR targets it, with "Stacked on #PR (issue #A). Merge that first." at the top of its body.
+  Several blockers must be on one chain; B stacks on the tip. A blocker with no PR skips B, saying
+  why. A batch runs blockers first and starts B once A has published.
+- **Conflicts.** After the check, the stack step trial-merges the branch against every open PR.
+  If it conflicts, the branch is rebased onto that PR (onto the one with the most conflicting files
+  when several unrelated PRs conflict; the PR body names the others) and the check runs again.
+- **Restacking.** Rerunning a stacked issue rebases it onto main once its parent has merged and
+  retargets the PR to main, or merges in the parent's new commits if it has moved on.
+
+Under `mergeBugs`, a bug never stacks: it is cut from origin/main, its PR targets main, and no
+other branch stacks on it by conflict. `stack: { blockers: false, conflicts: false }` turns it all off.
+Why branches are rebased before the push and merged after is in [ADR 0001](docs/adr/0001-rebase-before-push-merge-after.md).
+
 ### Prompts
 
 The prompts are in [`prompts/`](prompts). A repo overrides one by putting a file of the same
 name in `.sandcastle/`. Every prompt can use `{{REPO}}`, `{{BASE}}` (what to diff against),
 `{{VERIFY}}`, `{{REVERIFY}}`, `{{EVIDENCE}}`, `{{ISSUE_NUMBER}}` and Sandcastle's `{{TARGET_BRANCH}}`;
-`fix.md` also gets `{{TASK}}` and `pr.md` gets `{{CHECK}}`.
+`fix.md` also gets `{{TASK}}` and `pr.md` gets `{{CHECK}}`. On a stacked branch `{{BASE}}` is the
+parent's branch (`origin/<branch>`), so review, fixes and the PR body see only this issue's diff.
+`sync.md` gets `{{UPSTREAM}}`, the ref to merge in (origin/main, or the parent's branch).
+`stack.md` gets `{{ONTO}}` and `{{UPSTREAM}}`: it resolves a `git rebase --onto` that conflicted.
 
-The implement agent stops, rather than building on another agent's unmerged branch, by writing
-`out/pipeline/blocked.md`; the run then fails with its reason.
+A blocked issue's branch already holds its blocker's work, so the implement agent builds on it.
+It stops by writing `out/pipeline/blocked.md` only when the issue needs work on no branch it has;
+the run then fails with its reason.
 
 ## When a run fails
 

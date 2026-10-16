@@ -11,10 +11,10 @@ import {
   type IssueRun,
   type Reporter,
 } from "./pipeline.ts";
+import { blockersOf, BUG, nextIssue, order, Skip, type Status } from "./stack.ts";
 import { createBatchTui } from "./tui.ts";
 
 const READY = "ready-for-agent";
-const BUG = "bug";
 const CI_POLL_MS = 30_000;
 // No check at all after this long means CI is not coming.
 const CI_START_MS = 5 * 60_000;
@@ -37,6 +37,10 @@ const MAX_SYNCS = 2;
  * builds on the ones before it. If main moves on and the PR comes to conflict with it, an agent
  * merges main in (sync.md) and CI runs again. A bug whose review left a spec finding won't-fix or an
  * `Owner decision:` note stays open instead. Other issues stop at an open PR for the owner.
+ *
+ * With config.stack.blockers, other issues run after the issues GitHub says block them (blocked-by
+ * links), and an issue starts only once its blockers in the batch have published a PR, which it
+ * stacks on (src/stack.ts). An issue in a dependency cycle, or whose blocker failed, is skipped.
  *
  * Ctrl-C stops every agent and removes the containers; a second Ctrl-C force-removes them and quits.
  * Rerunning carries each issue on from where it stopped, as the single-issue runner does.
@@ -76,9 +80,22 @@ export async function runBatch(config: Config, args = process.argv.slice(2)): Pr
   const bugs = ready.filter((issue) => isBug(issue)).map(({ number }) => String(number));
   const others = ready.filter((issue) => !isBug(issue)).map(({ number }) => String(number));
 
-  const batch = new Batch(resolved, fresh, bugs, others, workers);
+  // Bugs under mergeBugs never stack, so only the other issues' blockers are read.
+  const blockedBy = new Map<string, string[]>();
+  if (resolved.stack.blockers) {
+    const read = await Promise.all(others.map(async (issue) => [issue, await blockersOf(issue)] as const));
+    for (const [issue, blockers] of read)
+      blockedBy.set(
+        issue,
+        blockers.filter(({ open }) => open).map((blocker) => blocker.issue),
+      );
+  }
+  const { order: ordered, cycles } = order(others, blockedBy);
+
+  const batch = new Batch(resolved, fresh, bugs, ordered, workers, blockedBy);
   if (skipped.length > 0) batch.tui.activity(`Skipped: ${skipped.join(", ")}`);
   batch.skipped = skipped;
+  for (const issue of cycles) batch.skip(issue, "in a dependency cycle, or blocked by an issue in one");
   await batch.run();
 }
 
@@ -92,24 +109,63 @@ class Batch {
   skipped: string[] = [];
   private setups: Promise<unknown> = Promise.resolve();
   private bugRunning = false;
-  private readonly blockedBy = new Map<string, number[]>();
+  /** Every issue's status, so an issue can wait for its blockers to publish. */
+  private readonly status = new Map<string, Status>();
+  // Resolves the workers waiting for a blocker to finish.
+  private wake = (): void => {};
+  // Open blockers of each bug, read as the bug lane takes them, for the report.
+  private readonly bugBlockers = new Map<string, number[]>();
 
   readonly config: Resolved;
   readonly fresh: boolean;
   readonly bugs: string[];
   readonly others: string[];
   readonly workers: number;
+  readonly blockedBy: ReadonlyMap<string, string[]>;
 
-  constructor(config: Resolved, fresh: boolean, bugs: string[], others: string[], workers: number) {
+  constructor(
+    config: Resolved,
+    fresh: boolean,
+    bugs: string[],
+    others: string[],
+    workers: number,
+    blockedBy: ReadonlyMap<string, string[]>,
+  ) {
     this.config = config;
     this.fresh = fresh;
     this.bugs = bugs;
     this.others = others;
     this.workers = workers;
+    this.blockedBy = blockedBy;
+    for (const issue of [...bugs, ...others]) this.status.set(issue, "queued");
     this.tui = createBatchTui(`Sandcastle batch · ${bugs.length + others.length} issue(s) · ${workers} worker(s)`, [
       ...bugs.map((issue) => ({ issue, tag: BUG })),
       ...others.map((issue) => ({ issue, tag: "" })),
     ]);
+  }
+
+  /** Leaves an issue out of the run, saying why; its dependents are skipped in turn. */
+  skip(issue: string, reason: string): void {
+    this.tui.set(issue, "stopped", "setup", `skipped: ${reason}`);
+    this.results.set(issue, `Skipped: ${reason}`);
+    this.settle(issue, "failed");
+  }
+
+  private settle(issue: string, status: Status): void {
+    this.status.set(issue, status);
+    const wake = this.wake;
+    this.wake = () => {};
+    wake();
+  }
+
+  private async changed(): Promise<void> {
+    await new Promise<void>((resolve) => {
+      const before = this.wake;
+      this.wake = () => {
+        before();
+        resolve();
+      };
+    });
   }
 
   async run(): Promise<void> {
@@ -147,22 +203,39 @@ class Batch {
     return result;
   };
 
-  // Each worker takes the next bug if no bug is running, otherwise the next other issue. A worker
-  // with only a busy bug lane left stops; the worker holding the lane carries on through the bugs.
-  // An issue with an open blocker waits in its queue, and is taken once the blocker closes (say, a
-  // bug merged before it); one still blocked when the queues run dry is never started.
+  // Each worker takes the next bug if no bug is running, otherwise the next other issue whose
+  // blockers have published. A worker with only a busy bug lane left stops; the worker holding the
+  // lane carries on through the bugs. One with only issues waiting on running blockers waits.
   private async worker(): Promise<void> {
     if (this.stop.signal.aborted) return;
-    const bug = this.bugRunning ? undefined : await takeUnblocked(this.bugs, openBlockers, this.blockedBy);
+    const bug = this.bugRunning ? undefined : await takeUnblocked(this.bugs, openBlockers, this.bugBlockers);
     if (bug !== undefined) {
       this.bugRunning = true;
       await this.runOne(bug, true);
       this.bugRunning = false;
       return this.worker();
     }
-    const issue = await takeUnblocked(this.others, openBlockers, this.blockedBy);
-    if (issue === undefined) return;
-    await this.runOne(issue, false);
+    const next = nextIssue(this.others, this.blockedBy, this.status);
+    for (const { issue, reason } of next.skip) {
+      this.others.splice(this.others.indexOf(issue), 1);
+      this.skip(issue, reason);
+    }
+    if (next.start !== undefined) {
+      this.others.splice(this.others.indexOf(next.start), 1);
+      await this.runOne(next.start, false);
+      return this.worker();
+    }
+    if (this.others.length === 0) return;
+    // Something waits on a blocker still running or queued in the bug lane; a skip above may also
+    // have freed something, so look again before waiting.
+    if (next.skip.length > 0) return this.worker();
+    const busy = [...this.status.values()].some((status) => status === "running") || this.bugs.length > 0;
+    if (!busy) {
+      for (const issue of [...this.others]) this.skip(issue, "blocked by an issue in this batch that never ran");
+      this.others.length = 0;
+      return;
+    }
+    await this.changed();
     return this.worker();
   }
 
@@ -173,6 +246,8 @@ class Batch {
       this.running.set(issue, step);
     };
     at("setup");
+    this.status.set(issue, "running");
+    let status: Status = "failed";
     try {
       // A bug builds on every bug merged before it, so it is cut from the latest origin/main.
       const progress = await runIssue({
@@ -187,6 +262,7 @@ class Batch {
         onStep: at,
       });
       const { url = "" } = progress;
+      status = progress.commented === true ? "commented" : "published";
       if (!bug || progress.commented === true || progress.green !== true) {
         tui.set(issue, "done", "publish", outcome(progress));
         this.results.set(issue, `${outcome(progress)}: ${url}`);
@@ -206,7 +282,10 @@ class Batch {
     } catch (error) {
       // runIssue (and resolveConflicts) have written the error and its stack to error.log.
       const current = this.running.get(issue) ?? "setup";
-      if (this.stop.signal.aborted) {
+      if (error instanceof Skip) {
+        tui.set(issue, "stopped", current, `skipped: ${error.message}`);
+        this.results.set(issue, `Skipped: ${error.message}`);
+      } else if (this.stop.signal.aborted) {
         tui.set(issue, "stopped", current, "stopped (Ctrl-C)");
         this.results.set(issue, `Stopped during ${current}`);
       } else {
@@ -215,6 +294,7 @@ class Batch {
       }
     } finally {
       this.running.delete(issue);
+      this.settle(issue, status);
     }
   }
 
@@ -297,7 +377,7 @@ class Batch {
       ...(this.skipped.length > 0 ? [`Skipped: ${this.skipped.join(", ")}`] : []),
       ...[...this.bugs, ...this.others].map((issue) => {
         if (this.stop.signal.aborted) return `#${issue}  Not started: interrupted`;
-        const blockers = this.blockedBy.get(issue) ?? [];
+        const blockers = this.bugBlockers.get(issue) ?? this.blockedBy.get(issue) ?? [];
         return `#${issue}  Not started: blocked by ${blockers.map((n) => `#${n}`).join(", ") || "an open issue"}`;
       }),
     ];

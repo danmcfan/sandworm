@@ -43,6 +43,13 @@ export interface Config {
     /** Issues carrying any of these labels wait for the owner and are left out. Defaults to ["needs-owner"]. */
     skipLabels?: string[];
   };
+  /**
+   * Stacking a branch on another issue's open PR (see GLOSSARY.md). `blockers`: cut the branch from
+   * the PR of an issue GitHub says blocks this one. `conflicts`: once the check has run, move the
+   * branch onto an open PR it conflicts with. Both default to true; false is the old behaviour,
+   * every branch cut from config.base and every PR into main.
+   */
+  stack?: { blockers?: boolean; conflicts?: boolean };
 }
 
 /** A Config with its defaults filled in. */
@@ -55,6 +62,7 @@ export interface Resolved {
   compare: string;
   workers: number;
   mergeBugs: boolean;
+  stack: { blockers: boolean; conflicts: boolean };
   skipLabels: string[];
   gates: GateRule[];
   /** The prompt args every prompt may use. */
@@ -74,6 +82,7 @@ export function resolve(config: Config): Resolved {
     compare,
     workers: config.batch?.workers ?? 1,
     mergeBugs: config.batch?.mergeBugs ?? false,
+    stack: { blockers: config.stack?.blockers ?? true, conflicts: config.stack?.conflicts ?? true },
     skipLabels: config.batch?.skipLabels ?? ["needs-owner"],
     gates: config.gates ?? [],
     args: {
