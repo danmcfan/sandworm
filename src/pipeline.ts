@@ -4,13 +4,21 @@ import { $ } from "bun";
 import { cpSync, existsSync, rmSync } from "node:fs";
 import { argsFor, promptPath, type Resolved } from "./config.ts";
 import { describe, journal } from "./journal.ts";
+import { conflictTarget, findParent, isParent, mergeIn, rebaseOnto, Skip, stackNote, type Parent } from "./stack.ts";
 import type { Tui } from "./tui.ts";
 
 // The pipeline for one issue, shared by the single-issue and batch runners.
 //
 // One container, one branch (config.branch, cut from config.base):
-//   implement (Opus) → review and triage (Opus) → fix (Sonnet) → check, refixing up to 3 times → PR body (Sonnet)
+//   implement (Opus) → review and triage (Opus) → fix (Sonnet) → check, refixing up to 3 times
+//   → stack → PR body (Sonnet)
 // then it pushes the branch and opens the PR. It is a draft if the check is still red.
+//
+// A branch is stacked (see GLOSSARY.md and src/stack.ts) when its issue is blocked by another
+// issue with an open PR: it is cut from that PR's branch, the prompts diff against it, and the PR
+// targets it. The stack step moves a branch that conflicts with an open PR onto that PR, before
+// anything is pushed. A rerun restacks: onto main once the parent has merged, or merging in the
+// parent's new commits. Bugs under mergeBugs (run.bug) never stack.
 // A branch with no commits (an audit that only filed issues) gets the PR body as an issue comment instead.
 // Each agent's full output goes to .sandcastle/logs/<issue>/, and every failure or stop to its error.log.
 //
@@ -26,7 +34,7 @@ const MAX_FIX_ROUNDS = 3;
 const OPUS = claudeCode("claude-opus-5-5", { effort: "low" });
 const SONNET = claudeCode("claude-sonnet-5-5", { effort: "low" });
 
-export const STEPS = ["feedback", "setup", "implement", "review", "fix", "check", "pr", "publish"] as const;
+export const STEPS = ["feedback", "setup", "implement", "review", "fix", "check", "stack", "pr", "publish"] as const;
 
 /** The parts of the progress view the pipeline drives. */
 export type Reporter = Omit<Tui, "close">;
@@ -41,6 +49,10 @@ export interface Progress {
   rounds?: number;
   /** When the newest owner comment a feedback round took in was made, as ISO 8601. */
   feedbackSeen?: string;
+  /** The open PR this branch is stacked on, if any; kept across --fresh and feedback rounds. */
+  parent?: Parent;
+  /** Open PRs the branch also conflicts with but could not stack on too, by number. */
+  alsoConflicts?: string[];
   /** How the last run ended, if it did not finish; error.log has the whole story. */
   failed?: { step: string; at: string; error: string };
 }
@@ -50,6 +62,8 @@ export interface IssueRun {
   issue: string;
   /** Ref a new branch is cut from, overriding config.base. */
   base?: string;
+  /** A bug under mergeBugs: cut from `base`, never stacked, and its PR always targets main. */
+  bug?: boolean;
   fresh?: boolean;
   reporter: Reporter;
   /** Aborting it stops the agent and removes the container; runIssue then rejects with its reason. */
@@ -83,8 +97,13 @@ export async function runIssue(run: IssueRun): Promise<Progress> {
       agentLog = log;
     });
   } catch (error) {
-    const what = run.signal.aborted ? `stopped: ${describe(run.signal.reason)}` : "failed";
-    journal(logs, step, what, run.signal.aborted ? undefined : error, agentLog);
+    const skipped = error instanceof Skip;
+    const what = run.signal.aborted
+      ? `stopped: ${describe(run.signal.reason)}`
+      : skipped
+        ? `skipped: ${error.message}`
+        : "failed";
+    journal(logs, step, what, run.signal.aborted || skipped ? undefined : error, agentLog);
     const stored: unknown = existsSync(stateFile) ? await Bun.file(stateFile).json() : undefined;
     const progress: Progress = isProgress(stored) ? stored : { done: [] };
     const failed = { step, at: new Date().toISOString(), error: run.signal.aborted ? what : describe(error) };
@@ -105,22 +124,34 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
   const stateFile = `${logs}/state.json`;
 
   if (run.fresh === true) for (const dir of config.keep) rmSync(saved(dir), { recursive: true, force: true });
-  const stored: unknown = run.fresh !== true && existsSync(stateFile) ? await Bun.file(stateFile).json() : undefined;
+  const stored: unknown = existsSync(stateFile) ? await Bun.file(stateFile).json() : undefined;
   let progress: Progress = isProgress(stored) ? stored : { done: [] };
+  // --fresh starts the steps over on the same branch, which is still stacked where it was.
+  if (run.fresh === true)
+    progress = progress.parent === undefined ? { done: [] } : { done: [], parent: progress.parent };
+  if (run.bug === true) delete progress.parent;
   delete progress.failed;
+  const save = async (): Promise<void> => {
+    await Bun.write(stateFile, JSON.stringify(progress, null, 2));
+  };
+  // What the branch's own work is measured from: its parent's branch if it is stacked.
+  const stackedOn = (): string | undefined =>
+    progress.parent === undefined ? undefined : `origin/${progress.parent.branch}`;
 
   const enter = (name: string): void => {
     run.onStep?.(name);
   };
 
   // A published PR with new owner comments starts a feedback round: every step after setup runs again.
+  // With none, the run has nothing to do unless the PR is stacked and may need restacking.
   enter("feedback");
   const feedback = await newFeedback(progress, signal);
+  const restackOnly = feedback?.comments === "";
   if (feedback === null)
     tui.skip("feedback", progress.url === undefined ? "no PR yet" : "no open PR, or a round to carry on");
   else if (feedback.comments === "") {
-    tui.done("feedback", "no new comments; nothing to do");
-    return progress;
+    tui.done("feedback", "no new comments");
+    if (progress.parent === undefined) return progress;
   } else {
     const rounds = (progress.rounds ?? 0) + 1;
     progress = {
@@ -128,35 +159,54 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
       rounds,
       ...(progress.url === undefined ? {} : { url: progress.url }),
       ...(feedback.seen === undefined ? {} : { feedbackSeen: feedback.seen }),
+      ...(progress.parent === undefined ? {} : { parent: progress.parent }),
     };
     // The last round's review and fixes would read as this round's.
     for (const file of ["review.md", "fixes.md", "check.log"]) rmSync(`${savedOut}/pipeline/${file}`, { force: true });
     await Bun.write(`${savedOut}/pipeline/feedback.md`, feedback.comments);
     await Bun.write(`${logs}/feedback-${rounds}.md`, feedback.comments);
-    // The local branch may lag the pushed one (the owner can push to the PR too).
+    tui.done("feedback", `round ${rounds}: ${feedback.count} comment(s)`);
+  }
+  // The local branch may lag the pushed one (the owner can push to the PR too).
+  if (feedback !== null) {
     await $`git fetch -q origin ${branch}`.quiet();
     const behind = await $`git merge-base --is-ancestor ${branch} origin/${branch}`.nothrow().quiet();
     if (behind.exitCode === 0) await $`git branch -f ${branch} origin/${branch}`.quiet();
-    tui.done("feedback", `round ${rounds}: ${feedback.count} comment(s)`);
   }
   const answering = progress.rounds !== undefined && existsSync(`${savedOut}/pipeline/feedback.md`);
 
   enter("setup");
+  // A new branch is cut from the open PR of the issue blocking it, if one does.
+  const exists = (await $`git rev-parse --verify --quiet refs/heads/${branch}`.nothrow().quiet()).exitCode === 0;
+  if (!exists) {
+    delete progress.parent;
+    if (run.bug !== true && config.stack.blockers) {
+      tui.start("setup", "reading blocked-by links");
+      const parent = await findParent(config, issue);
+      if (parent !== undefined) {
+        progress.parent = parent;
+        tui.activity(`stacking on ${parent.branch} (PR #${parent.pr})`);
+      }
+    }
+    await save();
+  }
+  const cutFrom = stackedOn() ?? base;
   tui.start("setup", "container and bun install");
-  // So a new branch builds on the latest main.
-  if (base.startsWith("origin/")) await $`git fetch -q origin ${base.slice("origin/".length)}`.quiet();
-  await using sandbox = await openSandbox(branch, base, run);
-  const out = `${sandbox.worktreePath}/out`;
+  // So a new branch builds on the latest main, or its parent's latest commits.
+  if (cutFrom.startsWith("origin/")) await $`git fetch -q origin ${cutFrom.slice("origin/".length)}`.quiet();
+  await using sandbox = await openSandbox(branch, cutFrom, run);
+  const worktree = sandbox.worktreePath;
+  const out = `${worktree}/out`;
   for (const dir of config.keep) {
-    if (existsSync(saved(dir))) cpSync(saved(dir), `${sandbox.worktreePath}/${dir}`, { recursive: true, force: false });
+    if (existsSync(saved(dir))) cpSync(saved(dir), `${worktree}/${dir}`, { recursive: true, force: false });
   }
   tui.done("setup");
 
   const record = async (name: string, extra: Omit<Progress, "done"> = {}): Promise<void> => {
     progress = { ...progress, ...extra, done: [...progress.done, name] };
-    await Bun.write(stateFile, JSON.stringify(progress, null, 2));
+    await save();
     for (const dir of config.keep) {
-      const live = `${sandbox.worktreePath}/${dir}`;
+      const live = `${worktree}/${dir}`;
       if (existsSync(live)) cpSync(live, saved(dir), { recursive: true, force: true });
     }
   };
@@ -185,11 +235,13 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
     const promptFile = promptPath(prompt);
     const log = `${logs}/${name}.log`;
     writing(log);
+    // A stacked branch's review, fixes and PR see only this issue's diff, not its parent's.
+    const args = { ...config.args, ISSUE_NUMBER: issue, BASE: stackedOn() ?? config.compare, ...promptArgs };
     const result = await sandbox.run({
       name,
       agent,
       promptFile,
-      promptArgs: await argsFor(promptFile, { ...config.args, ISSUE_NUMBER: issue, ...promptArgs }),
+      promptArgs: await argsFor(promptFile, args),
       logging: { type: "file", path: log, onAgentStreamEvent: tui.event },
       signal,
     });
@@ -198,11 +250,63 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
     runs.push({ step: `#${issue} ${name}`, result });
   };
 
+  // Moves the branch's own commits (those not in `upstream`) onto `onto`: by git when that is
+  // clean, otherwise by an agent resolving the conflicts (stack.md). Only for an unpushed branch,
+  // or one about to be force-pushed: it rewrites history.
+  const restackOnto = async (tuiStep: string, onto: string, upstream: string): Promise<void> => {
+    if (await rebaseOnto(worktree, onto, upstream)) return;
+    tui.activity(`rebase onto ${onto} conflicts: resolving (Opus)`);
+    await step(tuiStep, `stack-${Date.now()}`, OPUS, "stack.md", { ONTO: onto, UPSTREAM: upstream });
+    const onIt = await $`git merge-base --is-ancestor ${onto} HEAD`.cwd(worktree).nothrow().quiet();
+    if (onIt.exitCode !== 0) throw new Error(`the agent did not rebase the branch onto ${onto}`);
+  };
+
+  // A rerun of a stacked branch first catches up with its parent.
+  const published = progress.done.includes("publish") && progress.commented !== true;
+  const parent = progress.parent;
+  if (exists && parent !== undefined) {
+    enter("setup");
+    const view: unknown = await $`gh pr view ${parent.pr} --json state,headRefOid`.quiet().json();
+    const { state, head } = prState(view);
+    if (state === "MERGED") {
+      // A squash merge puts the parent's work on main as one new commit, so the branch's own
+      // commits move onto main; merging main in would conflict with the parent's own commits.
+      tui.start("setup", `parent PR #${parent.pr} merged: rebasing onto main`);
+      await $`git fetch -q origin main`.quiet();
+      await restackOnto("setup", "origin/main", parent.sha);
+      if (published) await recheck(sandbox, signal);
+      delete progress.parent;
+      await save();
+      if (published) {
+        await $`git push -q --force-with-lease origin ${branch}`.cwd(worktree).quiet();
+        await $`gh pr edit ${progress.url ?? branch} --base main`.cwd(worktree).quiet();
+      }
+      tui.activity(`restacked onto main; PR #${parent.pr} merged`);
+    } else if (state === "OPEN" && head !== parent.sha) {
+      // The parent moved on. The branch may be pushed, so its parent is merged in, not rebased onto.
+      tui.start("setup", `parent PR #${parent.pr} has new commits: merging them in`);
+      await $`git fetch -q origin ${parent.branch}`.quiet();
+      if (!(await mergeIn(worktree, `origin/${parent.branch}`))) {
+        tui.activity(`merging ${parent.branch} conflicts: resolving (Opus)`);
+        await step("setup", `sync-${Date.now()}`, OPUS, "sync.md", { UPSTREAM: `origin/${parent.branch}` });
+      }
+      const merged = await $`git merge-base --is-ancestor origin/${parent.branch} HEAD`.cwd(worktree).nothrow().quiet();
+      if (merged.exitCode !== 0) throw new Error(`the agent did not merge origin/${parent.branch}`);
+      if (published) await recheck(sandbox, signal);
+      progress.parent = { ...parent, sha: await tip(`origin/${parent.branch}`) };
+      await save();
+      if (published) await $`git push -q origin ${branch}`.cwd(worktree).quiet();
+    } else if (state === "CLOSED") {
+      tui.activity(`\u001B[33mparent PR #${parent.pr} was closed unmerged\u001B[0m; the branch still holds its work`);
+    }
+    tui.done("setup");
+  }
+  if (restackOnly) return progress;
+
   await phase("implement", "Opus", async () => {
     if (answering) await step("implement", `address-${progress.rounds}`, OPUS, "address.md");
     else await step("implement", "implement", OPUS, "implement.md");
-    // The agent stops here, rather than building on another agent's unmerged branch, when the
-    // issue needs work that is not on this branch yet.
+    // The agent stops here when the issue needs work that is on no branch it can build on.
     const blocked = `${out}/pipeline/blocked.md`;
     if (existsSync(blocked)) {
       const reason = (await Bun.file(blocked).text()).trim();
@@ -234,13 +338,40 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
     });
     return checkGreen(round + 1);
   };
-  enter("check");
-  if (progress.done.includes("check")) tui.skip("check", "done in an earlier run");
-  else {
+  const runCheck = async (): Promise<boolean> => {
     const green = await checkGreen(1);
     if (green) tui.done("check", "green");
     else tui.fail("check", `red after ${MAX_FIX_ROUNDS} fix rounds; PR will be a draft`);
-    await record("check", { green });
+    return green;
+  };
+  enter("check");
+  if (progress.done.includes("check")) tui.skip("check", "done in an earlier run");
+  else await record("check", { green: await runCheck() });
+
+  // Which files the work touches is only known once it is done, so conflicts with other open PRs
+  // are checked here, before anything is pushed, while the branch can still be rebased.
+  enter("stack");
+  if (progress.done.includes("stack")) tui.skip("stack", "done in an earlier run");
+  else if (run.bug === true || !config.stack.conflicts || answering)
+    await skipStep("stack", run.bug === true ? "a bug lands on main alone" : "off");
+  else {
+    tui.start("stack", "trial-merging against open PRs");
+    const found = await conflictTarget(config, issue, worktree);
+    if (found === undefined) {
+      tui.done("stack", "no conflicts with open PRs");
+      await record("stack");
+    } else {
+      const { parent: target, others } = found;
+      tui.start("stack", `conflicts with PR #${target.pr}: rebasing onto ${target.branch}`);
+      await restackOnto("stack", `origin/${target.branch}`, stackedOn() ?? config.compare);
+      progress.parent = target;
+      const also = others.map(({ number }) => number);
+      await save();
+      enter("check");
+      const green = await runCheck();
+      tui.done("stack", `stacked on PR #${target.pr}`);
+      await record("stack", { green, ...(also.length === 0 ? {} : { alsoConflicts: also }) });
+    }
   }
   const green = progress.green ?? false;
 
@@ -255,11 +386,18 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
     const pipeline = `${out}/pipeline`;
     const pr: unknown = await Bun.file(`${pipeline}/pr.json`).json();
     if (!isPrSpec(pr)) throw new Error(`${pipeline}/pr.json is not {"title": string, "attach": string[]}`);
+    const body = `${pipeline}/pr-body.md`;
+    // The stacking line goes first, so the owner sees the merge order before anything else.
+    if (progress.parent !== undefined) {
+      const text = await Bun.file(body).text();
+      const note = stackNote(progress.parent, progress.alsoConflicts);
+      if (!text.startsWith(note)) await Bun.write(body, `${note}\n\n${text.replace(/^Stacked on #.*\n\n/u, "")}`);
+    }
     // An audit can end with only follow-up issues and no commits, and GitHub refuses a PR with no
     // commits, so the PR body goes on the issue as a comment instead.
-    const commits = Number((await $`git rev-list --count ${base}..${branch}`.quiet().text()).trim());
+    const commits = Number((await $`git rev-list --count ${stackedOn() ?? base}..${branch}`.quiet().text()).trim());
     if (commits === 0) {
-      const url = (await $`gh issue comment ${issue} --body-file ${pipeline}/pr-body.md`.quiet().text()).trim();
+      const url = (await $`gh issue comment ${issue} --body-file ${body}`.quiet().text()).trim();
       tui.done("publish", url);
       await record("publish", { url, commented: true });
     } else {
@@ -268,17 +406,16 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
       // A run stopped after gh pr create but before recording it has already opened the PR.
       const existing = (await $`gh pr view ${branch} --json url --jq .url`.nothrow().quiet().text()).trim();
       const draft = green ? [] : ["--draft"];
+      const target = progress.parent === undefined ? [] : ["--base", progress.parent.branch];
       if (existing !== "" && answering) {
-        await $`gh pr edit ${existing} --title ${pr.title} --body-file ${pipeline}/pr-body.md ${attachments}`
-          .cwd(sandbox.worktreePath)
-          .quiet();
+        await $`gh pr edit ${existing} --title ${pr.title} --body-file ${body} ${attachments}`.cwd(worktree).quiet();
         if (green) await $`gh pr ready ${existing}`.nothrow().quiet();
       }
       const url =
         existing ||
         (
-          await $`gh pr create --head ${branch} --title ${pr.title} --body-file ${pipeline}/pr-body.md ${draft} ${attachments}`
-            .cwd(sandbox.worktreePath)
+          await $`gh pr create --head ${branch} ${target} --title ${pr.title} --body-file ${body} ${draft} ${attachments}`
+            .cwd(worktree)
             .quiet()
             .text()
         ).trim();
@@ -287,6 +424,30 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
     }
   }
   return progress;
+
+  async function skipStep(name: string, why: string): Promise<void> {
+    tui.skip(name, why);
+    await record(name);
+  }
+}
+
+// Reruns `bun run check` after a restack of a branch whose PR is open; a red check must not be pushed.
+async function recheck(
+  sandbox: { exec: (command: string) => Promise<{ exitCode: number }> },
+  signal: AbortSignal,
+): Promise<void> {
+  const check = await untilAborted(sandbox.exec("bun run check"), signal);
+  if (check.exitCode !== 0) throw new Error("bun run check fails after restacking; nothing was pushed");
+}
+
+const tip = async (ref: string): Promise<string> => (await $`git rev-parse ${ref}`.quiet().text()).trim();
+
+// A PR's state (OPEN, CLOSED or MERGED) and head commit, from `gh pr view --json state,headRefOid`.
+function prState(view: unknown): { state: string; head: string } {
+  if (typeof view !== "object" || view === null) return { state: "", head: "" };
+  const state = "state" in view && typeof view.state === "string" ? view.state : "";
+  const head = "headRefOid" in view && typeof view.headRefOid === "string" ? view.headRefOid : "";
+  return { state, head };
 }
 
 interface Feedback {
@@ -409,17 +570,21 @@ async function openSandbox(
 }
 
 /**
- * Merges origin/main into the issue's pushed branch, with an agent resolving the conflicts
- * (sync.md), and pushes the merge once `bun run check` passes. Throws if any of that fails.
+ * Merges `upstream` (origin/main, or a stacked branch's parent) into the issue's pushed branch,
+ * with an agent resolving the conflicts (sync.md), and pushes the merge once `bun run check`
+ * passes. Throws if any of that fails.
  */
-export async function resolveConflicts(run: Omit<IssueRun, "base" | "fresh" | "onStep">): Promise<void> {
+export async function resolveConflicts(
+  run: Omit<IssueRun, "base" | "fresh" | "onStep">,
+  upstream = "origin/main",
+): Promise<void> {
   const { config, issue, reporter: tui, signal, runs } = run;
   const branch = config.branch(issue);
   const logs = logsFor(issue);
-  await $`git fetch -q origin main ${branch}`.quiet();
+  await $`git fetch -q origin ${upstream.slice("origin/".length)} ${branch}`.quiet();
   // The local branch may lag the pushed one; the merge must build on what the PR holds.
   await $`git branch -f ${branch} origin/${branch}`.quiet();
-  await using sandbox = await openSandbox(branch, "origin/main", run);
+  await using sandbox = await openSandbox(branch, upstream, run);
   const name = `sync-${Date.now()}`;
   const log = `${logs}/${name}.log`;
   try {
@@ -428,13 +593,13 @@ export async function resolveConflicts(run: Omit<IssueRun, "base" | "fresh" | "o
       name,
       agent: OPUS,
       promptFile,
-      promptArgs: await argsFor(promptFile, { ...config.args, ISSUE_NUMBER: issue }),
+      promptArgs: await argsFor(promptFile, { ...config.args, ISSUE_NUMBER: issue, UPSTREAM: upstream }),
       logging: { type: "file", path: log, onAgentStreamEvent: tui.event },
       signal,
     });
     runs.push({ step: `#${issue} sync`, result });
-    const merged = await $`git merge-base --is-ancestor origin/main ${branch}`.nothrow().quiet();
-    if (merged.exitCode !== 0) throw new Error("the agent did not merge origin/main");
+    const merged = await $`git merge-base --is-ancestor ${upstream} ${branch}`.nothrow().quiet();
+    if (merged.exitCode !== 0) throw new Error(`the agent did not merge ${upstream}`);
     const check = await untilAborted(sandbox.exec("bun run check"), signal);
     if (check.exitCode !== 0) throw new Error("bun run check fails after the merge");
     await $`git push -q origin ${branch}`.quiet();
@@ -471,6 +636,7 @@ export function usageReport(runs: IssueRun["runs"]): string[] {
 function isProgress(value: unknown): value is Progress {
   if (typeof value !== "object" || value === null || !("done" in value)) return false;
   const { done } = value;
+  if ("parent" in value && !isParent(value.parent)) return false;
   return Array.isArray(done) && done.every((name: unknown) => typeof name === "string");
 }
 

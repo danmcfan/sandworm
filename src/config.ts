@@ -35,6 +35,13 @@ export interface Config {
      */
     mergeBugs?: boolean;
   };
+  /**
+   * Stacking a branch on another issue's open PR (see GLOSSARY.md). `blockers`: cut the branch from
+   * the PR of an issue GitHub says blocks this one. `conflicts`: once the check has run, move the
+   * branch onto an open PR it conflicts with. Both default to true; false is the old behaviour,
+   * every branch cut from config.base and every PR into main.
+   */
+  stack?: { blockers?: boolean; conflicts?: boolean };
 }
 
 /** A Config with its defaults filled in. */
@@ -47,6 +54,7 @@ export interface Resolved {
   compare: string;
   workers: number;
   mergeBugs: boolean;
+  stack: { blockers: boolean; conflicts: boolean };
   /** The prompt args every prompt may use. */
   args: Record<string, string>;
 }
@@ -64,6 +72,7 @@ export function resolve(config: Config): Resolved {
     compare,
     workers: config.batch?.workers ?? 1,
     mergeBugs: config.batch?.mergeBugs ?? false,
+    stack: { blockers: config.stack?.blockers ?? true, conflicts: config.stack?.conflicts ?? true },
     args: {
       REPO: config.repo,
       BASE: compare,

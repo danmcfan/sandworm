@@ -15,7 +15,7 @@ You are on branch `{{TARGET_BRANCH}}`, with dependencies installed.
 3. {{VERIFY}}
 4. `bun run check` must pass before you stop.
 
-Build only on this branch. Never `git reset`, rebase, or merge another branch into it. If the issue needs work that is not on this branch yet (a dependency still on another agent's branch or an unmerged PR), make no changes: write what is missing and where it lives to `out/pipeline/blocked.md`, and stop.
+Build only on this branch. Never `git reset`, rebase, or merge another branch into it. If the issue depends on another issue's unmerged PR, this branch was cut from that PR's branch, so the work is already here: build on it, and diff against `{{BASE}}` to see only this issue's changes. Only if the issue needs work that is on no branch you have (nothing in `git log` provides it), make no changes: write what is missing and where it lives to `out/pipeline/blocked.md`, and stop.
 
 Another agent reviews your work after you, so do not review it yourself. Do not push, open a PR or merge.
 

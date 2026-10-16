@@ -1,10 +1,20 @@
 import { describe as group, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expand } from "../src/batch.ts";
 import { argsFor, promptPath, resolve } from "../src/config.ts";
 import { journal } from "../src/journal.ts";
+import {
+  chainTip,
+  conflictingFiles,
+  exempt,
+  nextIssue,
+  order,
+  pickConflict,
+  rebaseOnto,
+  resolveBlockers,
+} from "../src/stack.ts";
 
 const config = {
   repo: "demo",
@@ -33,7 +43,15 @@ group("prompts", () => {
   test("every shared prompt has a value for each arg it uses", async () => {
     const dir = join(import.meta.dir, "../prompts");
     // The args the pipeline adds per step, and Sandcastle's own.
-    const known = new Set([...Object.keys(resolve(config).args), "ISSUE_NUMBER", "TASK", "CHECK", "TARGET_BRANCH"]);
+    const known = new Set([
+      ...Object.keys(resolve(config).args),
+      "ISSUE_NUMBER",
+      "TASK",
+      "CHECK",
+      "ONTO",
+      "UPSTREAM",
+      "TARGET_BRANCH",
+    ]);
     for (const name of readdirSync(dir)) {
       const used = [...readFileSync(join(dir, name), "utf8").matchAll(/\{\{\s*(\w+)\s*\}\}/gu)].map((m) => m[1]);
       expect({ name, unknown: used.filter((key) => key !== undefined && !known.has(key)) }).toEqual({
@@ -66,4 +84,192 @@ test("journal writes the step, the error and its stack to error.log and the agen
     expect(text).toContain("container went away");
     expect(text).toContain("sandworm.test.ts");
   }
+});
+
+group("stack: blockers", () => {
+  const pr = (number: string, branch: string) => ({ number, branch });
+
+  test("closed blockers set no constraint", () => {
+    expect(resolveBlockers([{ issue: "3", open: false }], new Set())).toEqual({ kind: "none" });
+  });
+
+  test("an open blocker with a PR is a parent candidate", () => {
+    const found = resolveBlockers([{ issue: "3", open: true, pr: pr("40", "agent/3") }], new Set());
+    expect(found).toEqual({ kind: "candidates", prs: [{ issue: "3", number: "40", branch: "agent/3" }] });
+  });
+
+  test("an open blocker in the batch with no PR yet is waited for", () => {
+    const found = resolveBlockers(
+      [
+        { issue: "3", open: true },
+        { issue: "4", open: true, pr: pr("41", "agent/4") },
+      ],
+      new Set(["3"]),
+    );
+    expect(found).toEqual({ kind: "wait", on: ["3"] });
+  });
+
+  test("an open blocker with no PR outside the batch skips the issue", () => {
+    const found = resolveBlockers([{ issue: "3", open: true }], new Set(["9"]));
+    expect(found.kind).toBe("skip");
+    expect(found.kind === "skip" && found.reason).toContain("#3");
+  });
+
+  test("the chain tip is the branch every other branch is an ancestor of", async () => {
+    // a ← b ← c
+    const line = ["a", "b", "c"];
+    const ancestor = async (x: string, y: string) => line.indexOf(x) <= line.indexOf(y);
+    expect(await chainTip(["b", "c", "a"], ancestor)).toBe("c");
+    expect(await chainTip(["a"], ancestor)).toBe("a");
+  });
+
+  test("unrelated branches have no chain tip", async () => {
+    const ancestor = async (x: string, y: string) => x === y;
+    expect(await chainTip(["a", "b"], ancestor)).toBeUndefined();
+  });
+});
+
+group("stack: batch order", () => {
+  test("blockers come before what they block, otherwise the given order holds", () => {
+    const blockedBy = new Map([
+      ["1", ["3"]],
+      ["2", []],
+      ["3", []],
+    ]);
+    expect(order(["1", "2", "3"], blockedBy)).toEqual({ order: ["3", "1", "2"], cycles: [] });
+  });
+
+  test("blockers outside the batch are ignored", () => {
+    expect(order(["1"], new Map([["1", ["99"]]]))).toEqual({ order: ["1"], cycles: [] });
+  });
+
+  test("a cycle, and whatever waits on it, is reported and left out", () => {
+    const blockedBy = new Map([
+      ["1", ["2"]],
+      ["2", ["1"]],
+      ["3", ["2"]],
+      ["4", []],
+    ]);
+    expect(order(["1", "2", "3", "4"], blockedBy)).toEqual({ order: ["4"], cycles: ["1", "2", "3"] });
+  });
+
+  test("an issue starts once its in-batch blockers have published", () => {
+    const blockedBy = new Map([
+      ["1", ["3"]],
+      ["2", []],
+    ]);
+    expect(nextIssue(["1", "2", "3"], blockedBy, new Map())).toEqual({ start: "2", skip: [] });
+    expect(nextIssue(["1"], blockedBy, new Map([["3", "running"]]))).toEqual({ skip: [] });
+    expect(nextIssue(["1"], blockedBy, new Map([["3", "published"]]))).toEqual({ start: "1", skip: [] });
+  });
+
+  test("an issue whose blocker failed is skipped", () => {
+    const next = nextIssue(["1", "2"], new Map([["1", ["3"]]]), new Map([["3", "failed"]]));
+    expect(next).toEqual({ start: "2", skip: [{ issue: "1", reason: "blocker #3 did not publish" }] });
+  });
+});
+
+group("stack: conflicts", () => {
+  const prs = {
+    small: { issue: "5", number: "50", branch: "agent/5" },
+    big: { issue: "6", number: "60", branch: "agent/6" },
+  };
+
+  test("unrelated conflicting PRs: stack on the one with more conflicting files", async () => {
+    const pick = await pickConflict(
+      [
+        { pr: prs.small, files: ["a.ts"] },
+        { pr: prs.big, files: ["a.ts", "b.ts"] },
+      ],
+      async (x, y) => x === y,
+    );
+    expect(pick).toEqual({ target: prs.big, others: [prs.small] });
+  });
+
+  test("conflicting PRs on one chain: stack on its tip", async () => {
+    // agent/6 ← agent/5
+    const pick = await pickConflict(
+      [
+        { pr: prs.small, files: ["a.ts"] },
+        { pr: prs.big, files: ["a.ts", "b.ts"] },
+      ],
+      async (x, y) => x === y || (x === "agent/6" && y === "agent/5"),
+    );
+    expect(pick).toEqual({ target: prs.small, others: [] });
+  });
+
+  test("bugs are exempt from stacking only when mergeBugs is on", () => {
+    const labels = [{ name: "bug" }];
+    expect(exempt(resolve({ ...config, batch: { mergeBugs: true } }), labels)).toBe(true);
+    expect(exempt(resolve(config), labels)).toBe(false);
+    expect(exempt(resolve({ ...config, batch: { mergeBugs: true } }), [{ name: "feature" }])).toBe(false);
+  });
+
+  test("stacking is on by default and each part can be turned off", () => {
+    expect(resolve(config).stack).toEqual({ blockers: true, conflicts: true });
+    expect(resolve({ ...config, stack: { conflicts: false } }).stack).toEqual({ blockers: true, conflicts: false });
+  });
+});
+
+group("stack: git", () => {
+  // main: a.txt=1; feature A changes a.txt and adds x.txt; child B branches from A and adds b.txt.
+  const repo = (): { git: (...args: string[]) => string; dir: string } => {
+    const dir = mkdtempSync(join(tmpdir(), "sandworm-git-"));
+    const git = (...args: string[]): string => {
+      const run = Bun.spawnSync(["git", "-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd: dir });
+      if (run.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${run.stderr.toString()}`);
+      return run.stdout.toString().trim();
+    };
+    const write = (file: string, text: string): void => {
+      writeFileSync(join(dir, file), text);
+      git("add", file);
+    };
+    git("init", "-q", "-b", "main");
+    write("a.txt", "1\n");
+    git("commit", "-qm", "base");
+    git("switch", "-qc", "A");
+    write("a.txt", "A\n");
+    write("x.txt", "x\n");
+    git("commit", "-qm", "A");
+    git("switch", "-qc", "B");
+    write("b.txt", "b\n");
+    git("commit", "-qm", "B");
+    git("switch", "-q", "main");
+    return { git, dir };
+  };
+
+  test("conflictingFiles names the files a trial merge conflicts on, and leaves the checkout alone", async () => {
+    const { git, dir } = repo();
+    git("switch", "-qc", "C", "main");
+    writeFileSync(join(dir, "a.txt"), "C\n");
+    git("commit", "-qam", "C");
+    expect(await conflictingFiles(dir, "C", "A")).toEqual(["a.txt"]);
+    expect(await conflictingFiles(dir, "B", "A")).toEqual([]);
+    expect(git("status", "--porcelain")).toBe("");
+  });
+
+  test("rebaseOnto moves only the child's commits, as after the parent is squash-merged", async () => {
+    const { git, dir } = repo();
+    const parentSha = git("rev-parse", "A");
+    // The parent lands on main as one squashed commit.
+    git("merge", "-q", "--squash", "A");
+    git("commit", "-qm", "A (squashed)");
+    git("switch", "-q", "B");
+    expect(await rebaseOnto(dir, "main", parentSha)).toBe(true);
+    expect(git("log", "--format=%s", "main..B")).toBe("B");
+    expect(git("show", "B:a.txt")).toBe("A");
+  });
+
+  test("rebaseOnto aborts and reports a conflict, leaving the branch as it was", async () => {
+    const { git, dir } = repo();
+    git("switch", "-qc", "C", "main");
+    writeFileSync(join(dir, "b.txt"), "c\n");
+    git("add", "b.txt");
+    git("commit", "-qm", "C");
+    git("switch", "-q", "B");
+    const before = git("rev-parse", "B");
+    expect(await rebaseOnto(dir, "C", "A")).toBe(false);
+    expect(git("rev-parse", "B")).toBe(before);
+    expect(git("status", "--porcelain")).toBe("");
+  });
 });

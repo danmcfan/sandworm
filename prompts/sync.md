@@ -2,14 +2,14 @@
 
 You work in the {{REPO}} repo on branch `{{TARGET_BRANCH}}`, for issue #{{ISSUE_NUMBER}}. Read `AGENTS.md` first and obey it.
 
-The branch's pull request conflicts with `origin/main`: other work merged after the branch was cut. GitHub runs no CI on a conflicting pull request, so it can't merge until this is fixed.
+The branch must take in `{{UPSTREAM}}`, which has moved on since the branch was cut from it or last merged it: main, or the open pull request this branch is stacked on. Its pull request will conflict until it does, and GitHub runs no CI on a conflicting pull request.
 
-!`git log --oneline origin/main..HEAD`
+!`git log --oneline {{UPSTREAM}}..HEAD`
 
 # Task
 
-1. Run `git merge origin/main` (a merge, not a rebase: the branch is already pushed).
-2. Resolve each conflict by hand so that the branch keeps both what main changed and what this issue changed. Read the main commits that touched the file (`git log origin/main -- <file>`) to see why it changed. A generated or binary file: take main's version, then regenerate it from the merged code.
+1. Run `git merge {{UPSTREAM}}` (a merge, not a rebase: the branch may already be pushed).
+2. Resolve each conflict by hand so that the branch keeps both what `{{UPSTREAM}}` changed and what this issue changed. Read its commits that touched the file (`git log {{UPSTREAM}} -- <file>`) to see why it changed. A generated or binary file: take its version, then regenerate it from the merged code.
 3. Commit the merge. Keep git's default merge message and list the resolved files under it.
 4. `bun run check` must pass. Fix any failure the merge caused, in a commit of its own.
 
