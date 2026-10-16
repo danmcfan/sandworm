@@ -3,7 +3,7 @@ import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { $ } from "bun";
 import { cpSync, existsSync, readdirSync, rmSync } from "node:fs";
 import { argsFor, promptPath, type Resolved } from "./config.ts";
-import { gate, report, rewind, type RunArtefacts } from "./gate.ts";
+import { gate, issuesIn, report, rewind, type RunArtefacts } from "./gate.ts";
 import { describe, journal } from "./journal.ts";
 import type { Tui } from "./tui.ts";
 
@@ -318,41 +318,30 @@ async function artefacts(worktree: string, issue: string, compare: string, evide
   const pipeline = `${worktree}/out/pipeline`;
   const read = async (file: string): Promise<string> =>
     existsSync(`${pipeline}/${file}`) ? Bun.file(`${pipeline}/${file}`).text() : "";
-  const pr: unknown = await Bun.file(`${pipeline}/pr.json`).json();
-  if (!isPrSpec(pr)) throw new Error(`${pipeline}/pr.json is not {"title": string, "attach": string[]}`);
+  const text = await read("pr.json");
+  const parsed: unknown = (() => {
+    try {
+      return JSON.parse(text);
+    } catch {
+      return null;
+    }
+  })();
+  const pr = isPrSpec(parsed) ? parsed : null;
   const lines = async (command: ReturnType<typeof $>): Promise<string[]> =>
     (await command.cwd(worktree).quiet().text()).split("\n").filter(Boolean);
-  const shown: unknown = JSON.parse(await $`gh issue view ${issue} --json number,labels,body,comments`.quiet().text());
-  const {
-    labels = [],
-    body = "",
-    comments = [],
-  } = shown as {
-    labels?: { name: string }[];
-    body?: string;
-    comments?: { body: string }[];
-  };
   const review = await read("review.md");
   const exists = new Map<number, boolean>();
-  for (const match of review.matchAll(/#(\d+)\b/gu)) {
-    const number = Number(match[1]);
+  for (const number of issuesIn(review)) {
     if (!exists.has(number))
       exists.set(number, (await $`gh issue view ${number} --json number`.nothrow().quiet()).exitCode === 0);
   }
   const dir = `${worktree}/${evidenceDir}`;
   return {
-    issue: {
-      number: Number(issue),
-      labels: labels.map(({ name }) => name),
-      body,
-      comments: comments.map((c) => c.body),
-    },
+    issue: { number: Number(issue) },
     review,
-    fixes: await read("fixes.md"),
     prBody: await read("pr-body.md"),
     pr,
     commits: await lines($`git log --format=%s ${compare}..HEAD`),
-    changedFiles: await lines($`git diff --name-only ${compare}...HEAD`),
     evidenceDir,
     evidence: existsSync(dir)
       ? readdirSync(dir, { recursive: true, encoding: "utf8" }).map((path) => `${evidenceDir}/${path}`)

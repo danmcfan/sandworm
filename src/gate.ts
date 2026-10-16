@@ -5,18 +5,15 @@ import type { Progress } from "./pipeline.ts";
 
 /** What a run left behind, read from the worktree and `gh`. */
 export interface RunArtefacts {
-  issue: { number: number; labels: string[]; body: string; comments: string[] };
+  issue: { number: number };
   /** out/pipeline/review.md */
   review: string;
-  /** out/pipeline/fixes.md */
-  fixes: string;
   /** out/pipeline/pr-body.md */
   prBody: string;
-  /** out/pipeline/pr.json */
-  pr: { title: string; attach: string[] };
+  /** out/pipeline/pr.json, or null when it is missing or malformed. */
+  pr: { title: string; attach: string[] } | null;
   /** Subjects of the commits reachable from the branch but not from the compare base. */
   commits: string[];
-  changedFiles: string[];
   /** The evidence directory, from the repo root, e.g. "out/verify". */
   evidenceDir: string;
   /** Every file under the evidence directory, from the repo root. */
@@ -30,7 +27,7 @@ export interface GateFailure {
 }
 
 const ISSUE = /#(\d+)\b/gu;
-const issuesIn = (text: string): number[] => [...text.matchAll(ISSUE)].map((match) => Number(match[1]));
+export const issuesIn = (text: string): number[] => [...text.matchAll(ISSUE)].map((match) => Number(match[1]));
 
 /** The lines under the `## <heading>` section of a Markdown document, up to the next `## `. */
 function section(markdown: string, heading: string): string[] {
@@ -65,6 +62,7 @@ function followUpLink({ prBody }: RunArtefacts): GateFailure[] {
 
 // Every evidence path in the body is on disk and attached, and every attachment is on disk.
 function evidence({ prBody, pr, evidenceDir, evidence: files }: RunArtefacts): GateFailure[] {
+  if (pr === null) return [];
   const escaped = evidenceDir.replaceAll(/[.*+?^${}()|[\]\\]/gu, "\\$&");
   const cited = [...prBody.matchAll(new RegExp(`\\./(${escaped}/[^\\s)"'\\]]+)`, "gu"))].map((match) => match[1] ?? "");
   const onDisk = new Set(files);
@@ -75,6 +73,13 @@ function evidence({ prBody, pr, evidenceDir, evidence: files }: RunArtefacts): G
   ].map((message) => ({ rule: "evidence", message }));
 }
 
+// pr.json exists and has a title and an attach list, so publish can read it.
+function prSpec({ pr }: RunArtefacts): GateFailure[] {
+  return pr === null
+    ? [{ rule: "pr-json", message: 'pr.json is missing or not {"title": string, "attach": string[]}' }]
+    : [];
+}
+
 // The branch holds only this issue's commits.
 function foreignCommit({ commits, issue }: RunArtefacts): GateFailure[] {
   return commits
@@ -82,7 +87,7 @@ function foreignCommit({ commits, issue }: RunArtefacts): GateFailure[] {
     .map((subject) => ({ rule: "foreign-commit", message: `names another issue: ${subject}` }));
 }
 
-const RULES = [wontFixIssue, followUpLink, evidence, foreignCommit];
+const RULES = [prSpec, wontFixIssue, followUpLink, evidence, foreignCommit];
 
 /** Every rule the run's outputs break; none means it may publish. */
 export function gate(artefacts: RunArtefacts): GateFailure[] {

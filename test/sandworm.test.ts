@@ -71,13 +71,11 @@ test("journal writes the step, the error and its stack to error.log and the agen
 
 group("gate", () => {
   const passing: RunArtefacts = {
-    issue: { number: 7, labels: ["enhancement"], body: "Build it.", comments: [] },
+    issue: { number: 7 },
     review: "## Standards\n\nS1 (should fix): rename it.\n\n## Spec\n\nP1 (won't fix: belongs to #9): add a flag.\n",
-    fixes: "S1: fixed\nP1: won't fix: belongs to #9\n",
     prBody: "Closes #7\n\n![menu](./out/verify/menu.png)\n\n## Follow-ups\n\n- P1: a flag, in #9\n",
     pr: { title: "Menu: add it", attach: ["out/verify/menu.png"] },
     commits: ["Menu: add it (#7)", "Menu: rename it"],
-    changedFiles: ["src/menu.ts"],
     evidenceDir: "out/verify",
     evidence: ["out/verify/menu.png"],
     issueExists: (issue) => issue === 7 || issue === 9,
@@ -123,6 +121,10 @@ group("gate", () => {
 
   test("fails a commit naming another issue", () => {
     expect(rules({ commits: ["Menu: add it (#7)", "Lobby: fix the timer (#8)"] })).toEqual(["foreign-commit"]);
+  });
+
+  test("fails a missing or malformed pr.json", () => {
+    expect(rules({ pr: null })).toEqual(["pr-json"]);
   });
 
   test("a failed gate sends the rerun back to fix", () => {
