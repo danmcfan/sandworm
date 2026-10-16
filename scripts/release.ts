@@ -21,6 +21,6 @@ const version =
 const text = await Bun.file("package.json").text();
 await Bun.write("package.json", text.replace(`"version": "${pkg.version}"`, `"version": "${version}"`));
 await $`git commit -qam ${`Release v${version}`}`;
-await $`git tag v${version}`;
+await $`git tag -m ${`v${version}`} v${version}`;
 await $`git push -q origin main v${version}`;
 console.log(`Released v${version}. In each repo: bun add -d github:danmcfan/sandworm#v${version}`);
