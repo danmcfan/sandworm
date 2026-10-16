@@ -9,11 +9,13 @@ import {
   chainTip,
   conflictingFiles,
   exempt,
+  mergeIn,
   nextIssue,
   order,
   pickConflict,
   rebaseOnto,
   resolveBlockers,
+  stackNote,
 } from "../src/stack.ts";
 
 const config = {
@@ -276,4 +278,33 @@ group("stack: git", () => {
     expect(git("rev-parse", "B")).toBe(before);
     expect(git("status", "--porcelain")).toBe("");
   });
+
+  test("mergeIn takes in a parent's new commits, and aborts cleanly on a conflict", async () => {
+    const { git, dir } = repo();
+    git("switch", "-q", "A");
+    writeFileSync(join(dir, "y.txt"), "y\n");
+    git("add", "y.txt");
+    git("commit", "-qm", "A2");
+    git("switch", "-q", "B");
+    expect(await mergeIn(dir, "A")).toBe(true);
+    expect(git("show", "B:y.txt")).toBe("y");
+
+    git("switch", "-q", "A");
+    writeFileSync(join(dir, "b.txt"), "from A\n");
+    git("add", "b.txt");
+    git("commit", "-qm", "A3");
+    git("switch", "-q", "B");
+    const before = git("rev-parse", "B");
+    expect(await mergeIn(dir, "A")).toBe(false);
+    expect(git("rev-parse", "B")).toBe(before);
+    expect(git("status", "--porcelain")).toBe("");
+  });
+});
+
+test("stackNote names the parent first, and any other PR the branch conflicts with", () => {
+  const parent = { issue: "3", branch: "agent/3", pr: "40", sha: "abc" };
+  expect(stackNote(parent)).toBe("Stacked on #40 (issue #3). Merge that first.");
+  expect(stackNote({ ...parent, issue: "" }, ["41"])).toBe(
+    "Stacked on #40. Merge that first. Also conflicts with #41, which will need a merge once one of them lands.",
+  );
 });
