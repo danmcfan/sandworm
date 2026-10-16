@@ -13,7 +13,7 @@ where it stopped; rerunning it once its PR is open answers the owner's new PR co
 ## Using it in a repo
 
 ```sh
-bun add -d github:danmcfan/sandworm#v0.1.0
+bun add -d github:danmcfan/sandworm#v0.2.0
 ```
 
 `.sandcastle/config.ts` says what is particular to the repo:
@@ -24,7 +24,7 @@ import { defineConfig } from "sandworm";
 export default defineConfig({
   repo: "arcade",
   // branch: (issue) => `agent/${issue}`,   // the default
-  // base: "HEAD",                          // or "origin/main", fetched first
+  base: "origin/main", // recommended; the default is "HEAD"
   // keep: ["out"],                         // gitignored dirs kept between runs
   prompts: {
     verify: "For any change the player can see or hear, write and run a verify check (…).",
@@ -32,6 +32,7 @@ export default defineConfig({
     evidence: "out/verify",
   },
   batch: { workers: 2, mergeBugs: true }, // skipLabels: ["needs-owner"], the default
+  // gates: [],                             // the repo's own gate rules, the default none
   // stack: { blockers: true, conflicts: true },   // the default; false for either turns it off
 });
 ```
@@ -54,6 +55,16 @@ await runBatch(config);
 
 and `"sandcastle": "bun .sandcastle/main.ts"`, `"sandcastle:batch": "bun .sandcastle/batch.ts"` in `package.json`.
 The repo keeps its own `Dockerfile`, `.env` (from `.env.example`) and `.gitignore` (`.env`, `logs/`, `worktrees/`) in `.sandcastle/`.
+
+Use `base: "origin/main"`. With the default `"HEAD"`, each new branch is cut from whatever is
+checked out, so running from an agent branch stacks the next issue on it by accident;
+`"origin/main"` is fetched before each issue and every branch starts from the latest main
+(real stacking on a blocker's PR still happens, see [Stacked PRs](#stacked-prs)).
+
+`batch.skipLabels` lists labels that mean an issue waits for the owner: a batch leaves any issue
+carrying one of them out and says so. It defaults to `["needs-owner"]`; `[]` runs every issue.
+
+`gates` adds the repo's own rules to [the gate](#the-gate) (below).
 
 ### Stacked PRs
 
@@ -89,13 +100,29 @@ A blocked issue's branch already holds its blocker's work, so the implement agen
 It stops by writing `out/pipeline/blocked.md` only when the issue needs work on no branch it has;
 the run then fails with its reason.
 
-## When a run fails
+### The gate
 
-The gate checks the run's outputs before publish: each won't-fix Spec finding names an issue that
+The gate step runs after the PR body is written and before publish. It checks the run's
+outputs: pr.json is there with a title and an attach list, each won't-fix Spec finding names an issue that
 exists (or says the finding is wrong), each `## Follow-ups` entry links an issue, every evidence path
 in the PR body is on disk and in `pr.json`'s `attach`, and no commit subject names another issue.
 A failure opens no PR; the failures are in `out/pipeline/gate.md` and `error.log`, and a rerun
 restarts at fix with them as its task.
+
+A repo adds rules of its own with `gates`, run after the built-in ones on the same outputs. A rule
+takes the `RunArtefacts` (review, PR body, pr.json, commit subjects, evidence files, …) and returns
+the failures it finds, or a promise of them; a rule that throws fails the gate too.
+
+```ts
+import { defineConfig, type GateRule } from "sandworm";
+
+const noTodo: GateRule = ({ prBody }) =>
+  /\bTODO\b/u.test(prBody) ? [{ rule: "no-todo", message: "the PR body has a TODO" }] : [];
+
+export default defineConfig({ /* … */ gates: [noTodo] });
+```
+
+## When a run fails
 
 Each issue's logs are in `.sandcastle/logs/<issue>/`: one log per agent session, `state.json`
 (the steps done, and under `failed` the step and error that ended the last run), and
