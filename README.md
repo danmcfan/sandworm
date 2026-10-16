@@ -31,7 +31,7 @@ export default defineConfig({
     reverify: "If a fix changes what the player sees or hears, rerun the verify check for it.",
     evidence: "out/verify",
   },
-  batch: { workers: 2, mergeBugs: true, skipLabels: ["needs-owner"] }, // skipLabels shown is the default
+  batch: { workers: 2, mergeBugs: true }, // skipLabels: ["needs-owner"], the default
   // gates: [],                             // the repo's own gate rules, the default none
   // stack: { blockers: true, conflicts: true },   // the default; false for either turns it off
 });
@@ -53,6 +53,9 @@ import config from "./config.ts";
 await runBatch(config);
 ```
 
+and `"sandcastle": "bun .sandcastle/main.ts"`, `"sandcastle:batch": "bun .sandcastle/batch.ts"` in `package.json`.
+The repo keeps its own `Dockerfile`, `.env` (from `.env.example`) and `.gitignore` (`.env`, `logs/`, `worktrees/`) in `.sandcastle/`.
+
 Use `base: "origin/main"`. With the default `"HEAD"`, each new branch is cut from whatever is
 checked out, so running from an agent branch stacks the next issue on it by accident;
 `"origin/main"` is fetched before each issue and every branch starts from the latest main
@@ -62,9 +65,6 @@ checked out, so running from an agent branch stacks the next issue on it by acci
 carrying one of them out and says so. It defaults to `["needs-owner"]`; `[]` runs every issue.
 
 `gates` adds the repo's own rules to [the gate](#the-gate) (below).
-
-and `"sandcastle": "bun .sandcastle/main.ts"`, `"sandcastle:batch": "bun .sandcastle/batch.ts"` in `package.json`.
-The repo keeps its own `Dockerfile`, `.env` (from `.env.example`) and `.gitignore` (`.env`, `logs/`, `worktrees/`) in `.sandcastle/`.
 
 ### Stacked PRs
 
