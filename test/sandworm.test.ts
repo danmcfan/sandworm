@@ -107,6 +107,18 @@ group("gate", () => {
     expect(await gate(passing, [() => []])).toEqual([]);
   });
 
+  test("turns a throwing repo rule into a failure", async () => {
+    const failures = await gate(passing, [
+      () => {
+        throw new Error("boom");
+      },
+      async () => Promise.reject(new Error("nope")),
+    ]);
+    expect(failures.map(({ rule }) => rule)).toEqual(["repo-rule", "repo-rule"]);
+    expect(failures[0]?.message).toContain("rule 0 threw");
+    expect(failures[1]?.message).toContain("nope");
+  });
+
   test("fails a won't-fix spec finding that names no issue", async () => {
     expect(await rules({ review: "## Spec\n\nP1 (won't fix: not worth it): add a flag.\n" })).toEqual([
       "wont-fix-issue",
