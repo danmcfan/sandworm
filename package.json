@@ -16,7 +16,9 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "check": "bun run typecheck && bun run format:check && bun test",
-    "release": "bun scripts/release.ts"
+    "release": "bun scripts/release.ts",
+    "sandcastle": "bun .sandcastle/main.ts",
+    "sandcastle:batch": "bun .sandcastle/batch.ts"
   },
   "peerDependencies": {
     "@ai-hero/sandcastle": "0.12.0"
