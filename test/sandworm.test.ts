@@ -169,6 +169,13 @@ group("stack: batch order", () => {
     expect(nextIssue(["1"], new Map([["1", ["7"]]]), new Map([["7", "queued"]]))).toEqual({ skip: [] });
   });
 
+  test("an issue whose blocker published only a comment is skipped, saying so", () => {
+    const next = nextIssue(["1"], new Map([["1", ["3"]]]), new Map([["3", "commented"]]));
+    expect(next).toEqual({
+      skip: [{ issue: "1", reason: "blocker #3 published no PR (it had no commits), so there is nothing to stack on" }],
+    });
+  });
+
   test("an issue whose blocker failed is skipped", () => {
     const next = nextIssue(["1", "2"], new Map([["1", ["3"]]]), new Map([["3", "failed"]]));
     expect(next).toEqual({ start: "2", skip: [{ issue: "1", reason: "blocker #3 did not publish" }] });

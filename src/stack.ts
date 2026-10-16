@@ -114,9 +114,10 @@ export function order(
 
 /**
  * Where a batch issue is: queued (not started; a bug waits in its own lane), running, published (has
- * a PR to stack on, or is merged), or failed, which covers stopped and skipped too.
+ * a PR to stack on, or is merged), commented (finished with no commits, so no PR, only a comment
+ * on its issue), or failed, which covers stopped and skipped too.
  */
-export type Status = "queued" | "running" | "published" | "failed";
+export type Status = "queued" | "running" | "published" | "commented" | "failed";
 
 /**
  * The next issue in `queue` that may start: the first whose in-batch blockers have all published.
@@ -134,7 +135,13 @@ export function nextIssue(
   for (const issue of queue) {
     const blockers = (blockedBy.get(issue) ?? []).filter((b) => queued.has(b) || status.has(b));
     const failed = blockers.find((b) => status.get(b) === "failed");
+    const commented = blockers.find((b) => status.get(b) === "commented");
     if (failed !== undefined) skip.push({ issue, reason: `blocker #${failed} did not publish` });
+    else if (commented !== undefined)
+      skip.push({
+        issue,
+        reason: `blocker #${commented} published no PR (it had no commits), so there is nothing to stack on`,
+      });
     else if (blockers.every((b) => status.get(b) === "published")) return { start: issue, skip };
   }
   return { skip };

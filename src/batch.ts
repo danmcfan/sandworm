@@ -259,7 +259,7 @@ class Batch {
         onStep: at,
       });
       const { url = "" } = progress;
-      status = "published";
+      status = progress.commented === true ? "commented" : "published";
       if (!bug || progress.commented === true || progress.green !== true) {
         tui.set(issue, "done", "publish", outcome(progress));
         this.results.set(issue, `${outcome(progress)}: ${url}`);
