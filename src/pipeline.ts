@@ -212,7 +212,9 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
     }
     await save();
   }
-  const cutFrom = stackedOn() ?? base;
+  // An existing branch is checked out as it is, and its parent's branch may be gone once that PR
+  // merged; the restack below moves it, so only a new branch is cut from the parent.
+  const cutFrom = exists ? base : (stackedOn() ?? base);
   tui.start("setup", "container and bun install");
   // So a new branch builds on the latest main, or its parent's latest commits.
   if (cutFrom.startsWith("origin/")) await $`git fetch -q origin ${cutFrom.slice("origin/".length)}`.quiet();
@@ -429,10 +431,8 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
       await record("stack", { green, ...(also.length === 0 ? {} : { alsoConflicts: also }) });
     }
   }
-  const green = progress.green ?? false;
-
   await phase("pr", "Sonnet", async () => {
-    await step("pr", "pr", SONNET, "pr.md", { CHECK: green ? "passing" : "FAILING" });
+    await step("pr", "pr", SONNET, "pr.md", { CHECK: (progress.green ?? false) ? "passing" : "FAILING" });
   });
 
   await phase(
@@ -459,6 +459,14 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
   if (progress.done.includes("publish")) tui.skip("publish", progress.url ?? "");
   else {
     tui.start("publish", "push and gh pr create");
+    // The parent PR may have merged (and its branch been deleted) while this run worked, and a PR
+    // cannot target a deleted branch: catch up with the parent first, and recheck if that moved it.
+    if (progress.parent !== undefined) {
+      await restack(progress.parent);
+      if (!progress.done.includes("check")) await record("check", { green: await runCheck() });
+      tui.start("publish", "push and gh pr create");
+    }
+    const green = progress.green ?? false;
     const pipeline = `${out}/pipeline`;
     const pr: unknown = await Bun.file(`${pipeline}/pr.json`).json();
     if (!isPrSpec(pr)) throw new Error(`${pipeline}/pr.json is not {"title": string, "attach": string[]}`);
@@ -478,7 +486,8 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
       await record("publish", { url, commented: true });
     } else {
       const attachments = pr.attach.flatMap((path) => ["--attach", path]);
-      await $`git push -q -u origin ${branch}`.quiet();
+      // An earlier failed publish may have pushed the branch before a restack rewrote it.
+      await $`git push -q -u --force-with-lease origin ${branch}`.quiet();
       // A run stopped after gh pr create but before recording it has already opened the PR.
       const existing = (await $`gh pr view ${branch} --json url --jq .url`.nothrow().quiet().text()).trim();
       const draft = green ? [] : ["--draft"];
