@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expand } from "../src/batch.ts";
+import { worktreeHolding } from "../src/pipeline.ts";
 import { argsFor, promptPath, resolve } from "../src/config.ts";
 import { journal } from "../src/journal.ts";
 import {
@@ -314,4 +315,19 @@ test("stackNote names the parent first, and any other PR the branch conflicts wi
   expect(stackNote({ ...parent, issue: "" }, ["41"])).toBe(
     "Stacked on #40. Merge that first. Also conflicts with #41, which will need a merge once one of them lands.",
   );
+});
+
+test("worktreeHolding finds the worktree a branch is checked out in", () => {
+  const porcelain = [
+    "worktree /repo",
+    "HEAD aaa",
+    "branch refs/heads/main",
+    "",
+    "worktree /repo/.sandcastle/worktrees/agent-3",
+    "HEAD bbb",
+    "branch refs/heads/agent/3",
+    "",
+  ].join("\n");
+  expect(worktreeHolding(porcelain, "agent/3")).toBe("/repo/.sandcastle/worktrees/agent-3");
+  expect(worktreeHolding(porcelain, "agent/30")).toBeUndefined();
 });

@@ -178,11 +178,7 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
     tui.done("feedback", `round ${rounds}: ${feedback.count} comment(s)`);
   }
   // The local branch may lag the pushed one (the owner can push to the PR too).
-  if (feedback !== null) {
-    await $`git fetch -q origin ${branch}`.quiet();
-    const behind = await $`git merge-base --is-ancestor ${branch} origin/${branch}`.nothrow().quiet();
-    if (behind.exitCode === 0) await $`git branch -f ${branch} origin/${branch}`.quiet();
-  }
+  if (feedback !== null) await catchUp(branch);
   const answering = progress.rounds !== undefined && existsSync(`${savedOut}/pipeline/feedback.md`);
 
   enter("setup");
@@ -447,6 +443,28 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
     tui.skip(name, why);
     await record(name);
   }
+}
+
+// Fast-forwards a local branch that lags its pushed copy. Git will not move a branch checked out
+// in a worktree, which a run that stopped, or left untracked files, keeps; that worktree is
+// fast-forwarded instead.
+async function catchUp(branch: string): Promise<void> {
+  await $`git fetch -q origin ${branch}`.quiet();
+  if ((await tipOf(branch)) === (await tipOf(`origin/${branch}`))) return;
+  const behind = await $`git merge-base --is-ancestor ${branch} origin/${branch}`.nothrow().quiet();
+  if (behind.exitCode !== 0) return;
+  const holder = worktreeHolding(await $`git worktree list --porcelain`.quiet().text(), branch);
+  if (holder === undefined) await $`git branch -f ${branch} origin/${branch}`.quiet();
+  else await $`git merge -q --ff-only origin/${branch}`.cwd(holder).quiet();
+}
+
+/** The worktree `branch` is checked out in, from `git worktree list --porcelain`, if any. */
+export function worktreeHolding(porcelain: string, branch: string): string | undefined {
+  const entry = porcelain
+    .split("\n\n")
+    .map((block) => block.split("\n"))
+    .find((lines) => lines.includes(`branch refs/heads/${branch}`));
+  return entry?.find((line) => line.startsWith("worktree "))?.slice("worktree ".length);
 }
 
 // Reruns `bun run check` after a restack of a branch whose PR is open; a red check must not be pushed.
