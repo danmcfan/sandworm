@@ -1,0 +1,347 @@
+import { $ } from "bun";
+import { resolve, type Config, type Resolved } from "./config.ts";
+import { describe, guard } from "./journal.ts";
+import {
+  containers,
+  logsFor,
+  outcome,
+  resolveConflicts,
+  runIssue,
+  usageReport,
+  type IssueRun,
+  type Reporter,
+} from "./pipeline.ts";
+import { createBatchTui } from "./tui.ts";
+
+const READY = "ready-for-agent";
+const BUG = "bug";
+const CI_POLL_MS = 30_000;
+// No check at all after this long means CI is not coming.
+const CI_START_MS = 5 * 60_000;
+// A run that takes longer than this is stuck.
+const CI_TIMEOUT_MS = 45 * 60_000;
+// Times a bug's PR may have main merged in to clear conflicts before it is left for the owner.
+const MAX_SYNCS = 2;
+
+/**
+ * `bun run sandcastle:batch [issues ...] [--workers N] [--fresh]`, where each issue is a number
+ * (`12`) or an inclusive range (`10-20`). With none it takes every open ready-for-agent issue,
+ * oldest first; a named issue that is closed, missing or lacks that label is skipped.
+ *
+ * Each issue goes through the same pipeline as the single-issue runner, up to N at a time
+ * (config.batch.workers, default 1). With config.batch.mergeBugs, bug issues (label `bug`) run
+ * one at a time, never alongside another bug: each is cut from a freshly fetched origin/main and,
+ * once its PR is green and CI passes, merged (squash) before the next bug starts, so every bug fix
+ * builds on the ones before it. If main moves on and the PR comes to conflict with it, an agent
+ * merges main in (sync.md) and CI runs again. Other issues stop at an open PR for the owner.
+ *
+ * Ctrl-C stops every agent and removes the containers; a second Ctrl-C force-removes them and quits.
+ * Rerunning carries each issue on from where it stopped, as the single-issue runner does.
+ */
+export async function runBatch(config: Config, args = process.argv.slice(2)): Promise<void> {
+  const resolved = resolve(config);
+  const fresh = args.includes("--fresh");
+  const workersAt = args.indexOf("--workers");
+  const workers = workersAt === -1 ? resolved.workers : Number(args[workersAt + 1]);
+  if (!Number.isInteger(workers) || workers < 1) throw new Error("--workers takes a whole number of at least 1.");
+  const named = [
+    ...new Set(
+      args.filter((arg, i) => arg !== "--fresh" && arg !== "--workers" && i !== workersAt + 1).flatMap(expand),
+    ),
+  ];
+
+  const fetched: unknown[] =
+    named.length > 0
+      ? await Promise.all(
+          named.map(async (n): Promise<unknown> => {
+            const view = await $`gh issue view ${n} --json number,state,labels`.nothrow().quiet();
+            return view.exitCode === 0 ? view.json() : { number: n, state: "MISSING", labels: [] };
+          }),
+        )
+      : [
+          await $`gh issue list --label ${READY} --state open --search sort:created-asc --limit 200 --json number,state,labels`
+            .quiet()
+            .json(),
+        ].flat();
+  const listed = fetched.filter((value) => isIssue(value));
+  const has = (issue: Issue, label: string): boolean => issue.labels.some(({ name }) => name === label);
+  const runnable = (issue: Issue): boolean => issue.state === "OPEN" && has(issue, READY);
+  const skipped = listed.filter((issue) => !runnable(issue)).map(({ number }) => `#${number}`);
+  const ready = listed.filter((issue) => runnable(issue));
+  if (ready.length === 0)
+    throw new Error(`No open ${READY} issues to run${skipped.length > 0 ? ` (skipped ${skipped.join(", ")})` : ""}.`);
+
+  const isBug = (issue: Issue): boolean => resolved.mergeBugs && has(issue, BUG);
+  const bugs = ready.filter((issue) => isBug(issue)).map(({ number }) => String(number));
+  const others = ready.filter((issue) => !isBug(issue)).map(({ number }) => String(number));
+
+  const batch = new Batch(resolved, fresh, bugs, others, workers);
+  if (skipped.length > 0) batch.tui.activity(`Skipped, not open and ${READY}: ${skipped.join(", ")}`);
+  batch.skipped = skipped;
+  await batch.run();
+}
+
+class Batch {
+  readonly tui;
+  readonly stop = new AbortController();
+  readonly runs: IssueRun["runs"] = [];
+  readonly results = new Map<string, string>();
+  /** The step each running issue is on. */
+  readonly running = new Map<string, string>();
+  skipped: string[] = [];
+  private setups: Promise<unknown> = Promise.resolve();
+  private bugRunning = false;
+
+  readonly config: Resolved;
+  readonly fresh: boolean;
+  readonly bugs: string[];
+  readonly others: string[];
+  readonly workers: number;
+
+  constructor(config: Resolved, fresh: boolean, bugs: string[], others: string[], workers: number) {
+    this.config = config;
+    this.fresh = fresh;
+    this.bugs = bugs;
+    this.others = others;
+    this.workers = workers;
+    this.tui = createBatchTui(`Sandcastle batch · ${bugs.length + others.length} issue(s) · ${workers} worker(s)`, [
+      ...bugs.map((issue) => ({ issue, tag: BUG })),
+      ...others.map((issue) => ({ issue, tag: "" })),
+    ]);
+  }
+
+  async run(): Promise<void> {
+    const before = new Set(containers());
+    let interrupts = 0;
+    const { finished } = guard(
+      () => [...this.running].map(([issue, step]) => ({ logs: logsFor(issue), step })),
+      (signal) => {
+        interrupts++;
+        if (interrupts === 1) {
+          this.tui.activity("\u001B[33mStopping\u001B[0m: removing the containers. Ctrl-C again to force quit.");
+          this.stop.abort(new Error(`Interrupted (${signal})`));
+          return;
+        }
+        const ours = containers().filter((id) => !before.has(id));
+        if (ours.length > 0) Bun.spawnSync(["docker", "rm", "-f", ...ours]);
+        this.tui.close([`Force quit. Removed ${ours.length} container(s).`, ...this.report()]);
+        process.exit(130);
+      },
+    );
+    const total = this.bugs.length + this.others.length;
+    await Promise.all(Array.from({ length: Math.min(this.workers, total) }, async () => this.worker()));
+    finished();
+    this.tui.close([...this.report(), "", ...usageReport(this.runs)]);
+    if (this.stop.signal.aborted) process.exitCode = 130;
+    else if ([...this.results.values()].some((result) => result.startsWith("Failed"))) process.exitCode = 1;
+  }
+
+  // Workers start their containers one at a time: creating git worktrees in the same repo at once
+  // can trip over git's lock files.
+  readonly serialize = async <T>(work: () => Promise<T>): Promise<T> => {
+    const turn = this.setups.then(work);
+    this.setups = turn.catch(() => null);
+    const result = await turn;
+    return result;
+  };
+
+  // Each worker takes the next bug if no bug is running, otherwise the next other issue. A worker
+  // with only a busy bug lane left stops; the worker holding the lane carries on through the bugs.
+  private async worker(): Promise<void> {
+    if (this.stop.signal.aborted) return;
+    const bug = this.bugRunning ? undefined : this.bugs.shift();
+    if (bug !== undefined) {
+      this.bugRunning = true;
+      await this.runOne(bug, true);
+      this.bugRunning = false;
+      return this.worker();
+    }
+    const issue = this.others.shift();
+    if (issue === undefined) return;
+    await this.runOne(issue, false);
+    return this.worker();
+  }
+
+  private async runOne(issue: string, bug: boolean): Promise<void> {
+    const { tui } = this;
+    const reporter = tui.reporter(issue);
+    const at = (step: string): void => {
+      this.running.set(issue, step);
+    };
+    at("setup");
+    try {
+      // A bug builds on every bug merged before it, so it is cut from the latest origin/main.
+      const progress = await runIssue({
+        config: this.config,
+        issue,
+        ...(bug ? { base: "origin/main" } : {}),
+        fresh: this.fresh,
+        reporter,
+        signal: this.stop.signal,
+        serialize: this.serialize,
+        runs: this.runs,
+        onStep: at,
+      });
+      const { url = "" } = progress;
+      if (!bug || progress.commented === true || progress.green !== true) {
+        tui.set(issue, "done", "publish", outcome(progress));
+        this.results.set(issue, `${outcome(progress)}: ${url}`);
+        return;
+      }
+      at("merge");
+      const left = await this.land(issue, url, reporter);
+      if (left === null) {
+        tui.set(issue, "done", "merge", "merged");
+        this.results.set(issue, `Merged: ${url}`);
+      } else {
+        tui.set(issue, "failed", "merge", `${left}; PR left open`);
+        this.results.set(issue, `PR left open, ${left}: ${url}`);
+      }
+    } catch (error) {
+      // runIssue (and resolveConflicts) have written the error and its stack to error.log.
+      const current = this.running.get(issue) ?? "setup";
+      if (this.stop.signal.aborted) {
+        tui.set(issue, "stopped", current, "stopped (Ctrl-C)");
+        this.results.set(issue, `Stopped during ${current}`);
+      } else {
+        tui.set(issue, "failed", current, "failed");
+        this.results.set(issue, `Failed during ${current}: ${describe(error)}`);
+      }
+    } finally {
+      this.running.delete(issue);
+    }
+  }
+
+  // Merges a bug's green PR once CI passes; null when merged, otherwise why it was left open.
+  // Main can move on while a bug runs (the owner merges something), so the PR can come to conflict
+  // with it; then an agent merges main in, and CI runs again, up to MAX_SYNCS times.
+  private async land(issue: string, url: string, reporter: Reporter, syncs = 0): Promise<string | null> {
+    const { tui } = this;
+    const state = async (field: string): Promise<string> =>
+      (await $`gh pr view ${url} --json ${field} --jq .${field}`.quiet().text()).trim();
+    if ((await state("state")) === "MERGED") return null;
+    // CI runs on this commit; the merge is refused if the branch has moved on since.
+    const head = await state("headRefOid");
+    // GitHub works out mergeable lazily and can say UNKNOWN for a long time, so git decides too:
+    // before waiting, and again if CI never starts or never finishes.
+    const early = await this.conflictsWithMain(issue);
+    tui.set(
+      issue,
+      "running",
+      "merge",
+      syncs === 0 ? "waiting for CI" : `waiting for CI, after merging main (${syncs})`,
+    );
+    const ci = early ? "conflicting" : await this.waitForCi(url);
+    if (this.stop.signal.aborted) throw new Error("Interrupted");
+    const stalled = ci === "never started" || ci === "timed out";
+    if (ci === "conflicting" || (stalled && (await this.conflictsWithMain(issue)))) {
+      if (syncs >= MAX_SYNCS) return `still conflicts with main after ${MAX_SYNCS} merge(s)`;
+      tui.set(issue, "running", "merge", "conflicts with main: merging it in (Opus)");
+      await resolveConflicts({
+        config: this.config,
+        issue,
+        reporter,
+        signal: this.stop.signal,
+        serialize: this.serialize,
+        runs: this.runs,
+      });
+      return this.land(issue, url, reporter, syncs + 1);
+    }
+    if (ci !== "passed") return `CI ${ci}`;
+    tui.set(issue, "running", "merge", "gh pr merge --squash");
+    const merge = await $`gh pr merge ${url} --squash --delete-branch --match-head-commit ${head}`.nothrow().quiet();
+    // gh can merge and then fail to delete the local branch (say, a kept worktree still has it),
+    // so the PR's state decides, not the exit code. A merge refused because main moved during CI
+    // goes round again, and the next poll finds the conflict.
+    if (merge.exitCode === 0 || (await state("state")) === "MERGED") return null;
+    if ((await state("mergeable")) === "CONFLICTING") return this.land(issue, url, reporter, syncs);
+    return `merge refused (${merge.stderr.toString().trim()})`;
+  }
+
+  // Polls the PR until its CI finishes on the head commit. Every poll also reads whether the PR
+  // conflicts with main, because GitHub runs no CI on a conflicting PR: it would wait forever.
+  private async waitForCi(url: string, started = Date.now()): Promise<CiResult> {
+    if (this.stop.signal.aborted) return "failed";
+    const view: unknown = await $`gh pr view ${url} --json mergeable,statusCheckRollup`.quiet().json();
+    const { mergeable, checks } = prChecks(view);
+    if (mergeable === "CONFLICTING") return "conflicting";
+    const waited = Date.now() - started;
+    if (checks.includes("failed")) return "failed";
+    if (checks.length > 0 && checks.every((check) => check === "passed")) return "passed";
+    // A PR opened a moment ago may have no checks yet, and GitHub may still be working out mergeable.
+    if (checks.length === 0 && waited > CI_START_MS) return "never started";
+    if (waited > CI_TIMEOUT_MS) return "timed out";
+    await Bun.sleep(CI_POLL_MS);
+    return this.waitForCi(url, started);
+  }
+
+  // Whether the issue's pushed branch conflicts with the latest main, by a trial merge in git.
+  private async conflictsWithMain(issue: string): Promise<boolean> {
+    const branch = this.config.branch(issue);
+    await $`git fetch -q origin main ${branch}`.quiet();
+    const trial = await $`git merge-tree --write-tree origin/main origin/${branch}`.nothrow().quiet();
+    // 1 is a conflict; anything else non-zero is git failing, which must not pass for one.
+    if (trial.exitCode > 1) throw new Error(`git merge-tree failed: ${trial.stderr.toString().trim()}`);
+    return trial.exitCode === 1;
+  }
+
+  report(): string[] {
+    return [
+      ...[...this.results].map(([issue, result]) => `#${issue}  ${result}  (logs: ${logsFor(issue)}/)`),
+      ...(this.skipped.length > 0 ? [`Skipped, not open and ${READY}: ${this.skipped.join(", ")}`] : []),
+    ];
+  }
+}
+
+type CiResult = "passed" | "failed" | "conflicting" | "never started" | "timed out";
+
+interface Issue {
+  number: number;
+  state: string;
+  labels: { name: string }[];
+}
+
+// mergeable is MERGEABLE, CONFLICTING or UNKNOWN; each check run or commit status is pending, passed or failed.
+function prChecks(view: unknown): { mergeable: string; checks: ("pending" | "passed" | "failed")[] } {
+  if (typeof view !== "object" || view === null) return { mergeable: "UNKNOWN", checks: [] };
+  const mergeable = "mergeable" in view && typeof view.mergeable === "string" ? view.mergeable : "UNKNOWN";
+  const rollup = "statusCheckRollup" in view && Array.isArray(view.statusCheckRollup) ? view.statusCheckRollup : [];
+  const checks = rollup.map((check: unknown) => {
+    const field = (key: string): string => {
+      const value: unknown = typeof check === "object" && check !== null ? Reflect.get(check, key) : undefined;
+      return typeof value === "string" ? value : "";
+    };
+    // A check run has status and conclusion; a commit status has state.
+    const state = field("state");
+    if (state !== "")
+      return state === "SUCCESS" ? "passed" : state === "PENDING" || state === "EXPECTED" ? "pending" : "failed";
+    if (field("status") !== "COMPLETED") return "pending";
+    return ["SUCCESS", "SKIPPED", "NEUTRAL"].includes(field("conclusion")) ? "passed" : "failed";
+  });
+  return { mergeable, checks };
+}
+
+/** `12` → [12]; `10-20` → [10, 11, …, 20]. */
+export function expand(arg: string): number[] {
+  const range = /^(\d+)-(\d+)$/u.exec(arg);
+  if (range) {
+    const from = Number(range[1]);
+    const to = Number(range[2]);
+    if (from > to) throw new Error(`Range ${arg} runs backwards.`);
+    return Array.from({ length: to - from + 1 }, (_, i) => from + i);
+  }
+  if (/^\d+$/u.test(arg)) return [Number(arg)];
+  throw new Error(`Not an issue number or range: ${arg}. Use e.g. 12 or 10-20.`);
+}
+
+function isIssue(value: unknown): value is Issue {
+  if (typeof value !== "object" || value === null) return false;
+  if (!("number" in value) || !("state" in value) || !("labels" in value)) return false;
+  const { number, state, labels } = value;
+  return (
+    typeof number === "number" &&
+    typeof state === "string" &&
+    Array.isArray(labels) &&
+    labels.every((label: unknown) => typeof label === "object" && label !== null && "name" in label)
+  );
+}

@@ -1,0 +1,31 @@
+{
+  "name": "sandworm",
+  "version": "0.1.0",
+  "description": "The Sandcastle issue → PR pipeline shared by danmcfan's repos.",
+  "type": "module",
+  "repository": "github:danmcfan/sandworm",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "prompts"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check": "bun run typecheck && bun run format:check && bun test",
+    "release": "bun scripts/release.ts"
+  },
+  "peerDependencies": {
+    "@ai-hero/sandcastle": "0.12.0"
+  },
+  "devDependencies": {
+    "@ai-hero/sandcastle": "0.12.0",
+    "@standard-schema/spec": "1.1.0",
+    "@types/bun": "1.4.2",
+    "prettier": "3.9.10",
+    "typescript": "7.0.2"
+  }
+}
