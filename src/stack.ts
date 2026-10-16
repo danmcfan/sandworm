@@ -199,7 +199,7 @@ export async function mergeIn(cwd: string, ref: string): Promise<boolean> {
 const isAncestorOnOrigin: IsAncestor = async (ancestor, descendant) =>
   (await $`git merge-base --is-ancestor origin/${ancestor} origin/${descendant}`.nothrow().quiet()).exitCode === 0;
 
-const tipOf = async (ref: string): Promise<string> => (await $`git rev-parse ${ref}`.quiet().text()).trim();
+export const tipOf = async (ref: string): Promise<string> => (await $`git rev-parse ${ref}`.quiet().text()).trim();
 
 /** An open PR, with what the pipeline needs to match it to issues. */
 interface OpenPr extends Pr {
@@ -244,6 +244,7 @@ export async function blockersOf(issue: string): Promise<{ issue: string; open: 
     .flatMap((line) => {
       const value: unknown = JSON.parse(line);
       if (typeof value !== "object" || value === null || !("number" in value) || !("state" in value)) return [];
+      if (typeof value.number !== "number") return [];
       return [{ issue: String(value.number), open: value.state === "open" }];
     });
 }
@@ -267,8 +268,8 @@ export async function findParent(config: Resolved, issue: string): Promise<Paren
     }),
     new Set(),
   );
-  if (found.kind === "skip") throw new Skip(found.reason);
-  if (found.kind === "wait") throw new Skip(`blocked by ${found.on.map((b) => `#${b}`).join(", ")}, not yet published`);
+  // With no batch to wait in, "wait" cannot come back.
+  if (found.kind === "skip" || found.kind === "wait") throw new Skip(found.kind === "skip" ? found.reason : "blocked");
   if (found.kind === "none") return undefined;
   await $`git fetch -q origin ${found.prs.map(({ branch }) => branch)}`.quiet();
   const tip = await chainTip(
@@ -287,26 +288,33 @@ export async function findParent(config: Resolved, issue: string): Promise<Paren
  * The open PR the branch checked out in `cwd` should move onto because it conflicts with it, and the
  * other conflicting PRs it could not also stack on. Leaves out the branch's own PR, PRs already in
  * its history (its parent and theirs), and under mergeBugs every bug's PR, since a bug lands on main
- * alone and a branch stacked on it would wait on its merge.
+ * alone and a branch stacked on it would wait on its merge. A branch already stacked on `current`
+ * may only move onto a PR built on that parent, or it would leave behind the work it was blocked on;
+ * other conflicting PRs only go in `others`.
  */
 export async function conflictTarget(
   config: Resolved,
   issue: string,
   cwd: string,
+  current?: Parent,
 ): Promise<{ parent: Parent; others: Pr[] } | undefined> {
   const own = config.branch(issue);
   const prs = (await openPrs(config)).filter(({ branch, bug }) => branch !== own && !bug);
   if (prs.length === 0) return undefined;
   await $`git fetch -q origin ${prs.map(({ branch }) => branch)}`.quiet();
   const conflicts: { pr: Pr; files: string[] }[] = [];
+  const unreachable: Pr[] = [];
   for (const { closes: _closes, bug: _bug, ...pr } of prs) {
     const contained = await $`git merge-base --is-ancestor origin/${pr.branch} HEAD`.cwd(cwd).nothrow().quiet();
     if (contained.exitCode === 0) continue;
     const files = await conflictingFiles(cwd, "HEAD", `origin/${pr.branch}`);
-    if (files.length > 0) conflicts.push({ pr, files });
+    if (files.length === 0) continue;
+    if (current === undefined || (await isAncestorOnOrigin(current.branch, pr.branch))) conflicts.push({ pr, files });
+    else unreachable.push(pr);
   }
   const pick = await pickConflict(conflicts, isAncestorOnOrigin);
-  if (pick === undefined) return undefined;
+  if (pick === undefined)
+    return unreachable.length === 0 || current === undefined ? undefined : { parent: current, others: unreachable };
   const { target } = pick;
   return {
     parent: {
@@ -315,7 +323,7 @@ export async function conflictTarget(
       pr: target.number,
       sha: await tipOf(`origin/${target.branch}`),
     },
-    others: pick.others,
+    others: [...pick.others, ...unreachable],
   };
 }
 
@@ -348,8 +356,12 @@ function isListedPr(value: unknown): value is ListedPr {
     typeof value.number === "number" &&
     typeof value.headRefName === "string" &&
     Array.isArray(refs) &&
-    refs.every((ref: unknown) => typeof ref === "object" && ref !== null && "number" in ref) &&
+    refs.every(
+      (ref: unknown) => typeof ref === "object" && ref !== null && typeof Reflect.get(ref, "number") === "number",
+    ) &&
     Array.isArray(labels) &&
-    labels.every((label: unknown) => typeof label === "object" && label !== null && "name" in label)
+    labels.every(
+      (label: unknown) => typeof label === "object" && label !== null && typeof Reflect.get(label, "name") === "string",
+    )
   );
 }

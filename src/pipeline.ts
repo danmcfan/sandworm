@@ -4,7 +4,17 @@ import { $ } from "bun";
 import { cpSync, existsSync, rmSync } from "node:fs";
 import { argsFor, promptPath, type Resolved } from "./config.ts";
 import { describe, journal } from "./journal.ts";
-import { conflictTarget, findParent, isParent, mergeIn, rebaseOnto, Skip, stackNote, type Parent } from "./stack.ts";
+import {
+  conflictTarget,
+  findParent,
+  isParent,
+  mergeIn,
+  rebaseOnto,
+  Skip,
+  stackNote,
+  tipOf,
+  type Parent,
+} from "./stack.ts";
 import type { Tui } from "./tui.ts";
 
 // The pipeline for one issue, shared by the single-issue and batch runners.
@@ -275,6 +285,8 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
       await $`git fetch -q origin main`.quiet();
       await restackOnto("setup", "origin/main", parent.sha);
       if (published) await recheck(sandbox, signal);
+      // An unpublished branch's check ran before the rebase, so it runs again.
+      else progress.done = progress.done.filter((name) => name !== "check");
       delete progress.parent;
       await save();
       if (published) {
@@ -293,7 +305,8 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
       const merged = await $`git merge-base --is-ancestor origin/${parent.branch} HEAD`.cwd(worktree).nothrow().quiet();
       if (merged.exitCode !== 0) throw new Error(`the agent did not merge origin/${parent.branch}`);
       if (published) await recheck(sandbox, signal);
-      progress.parent = { ...parent, sha: await tip(`origin/${parent.branch}`) };
+      else progress.done = progress.done.filter((name) => name !== "check");
+      progress.parent = { ...parent, sha: await tipOf(`origin/${parent.branch}`) };
       await save();
       if (published) await $`git push -q origin ${branch}`.cwd(worktree).quiet();
     } else if (state === "CLOSED") {
@@ -356,14 +369,19 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
     await skipStep("stack", run.bug === true ? "a bug lands on main alone" : "off");
   else {
     tui.start("stack", "trial-merging against open PRs");
-    const found = await conflictTarget(config, issue, worktree);
-    if (found === undefined) {
+    const found = await conflictTarget(config, issue, worktree, progress.parent);
+    if (found !== undefined && found.parent === progress.parent) {
+      // Conflicts only with PRs it cannot also stack on; the PR body names them.
+      tui.done("stack", `stays on PR #${found.parent.pr}`);
+      await record("stack", { alsoConflicts: found.others.map(({ number }) => number) });
+    } else if (found === undefined) {
       tui.done("stack", "no conflicts with open PRs");
       await record("stack");
     } else {
       const { parent: target, others } = found;
       tui.start("stack", `conflicts with PR #${target.pr}: rebasing onto ${target.branch}`);
-      await restackOnto("stack", `origin/${target.branch}`, stackedOn() ?? config.compare);
+      // The branch's own commits start where it was cut: its parent, or the base (main for a HEAD base).
+      await restackOnto("stack", `origin/${target.branch}`, stackedOn() ?? (base === "HEAD" ? config.compare : base));
       progress.parent = target;
       const also = others.map(({ number }) => number);
       await save();
@@ -439,8 +457,6 @@ async function recheck(
   const check = await untilAborted(sandbox.exec("bun run check"), signal);
   if (check.exitCode !== 0) throw new Error("bun run check fails after restacking; nothing was pushed");
 }
-
-const tip = async (ref: string): Promise<string> => (await $`git rev-parse ${ref}`.quiet().text()).trim();
 
 // A PR's state (OPEN, CLOSED or MERGED) and head commit, from `gh pr view --json state,headRefOid`.
 function prState(view: unknown): { state: string; head: string } {
