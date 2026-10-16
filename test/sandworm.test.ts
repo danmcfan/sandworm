@@ -19,6 +19,7 @@ import {
   stackNote,
   withoutStackNote,
 } from "../src/stack.ts";
+import { gate, rewind, type RunArtefacts } from "../src/gate.ts";
 
 const config = {
   repo: "demo",
@@ -339,4 +340,67 @@ test("withoutStackNote removes the stacking line a PR body starts with, and noth
     "Closes #4\n\nStacked on #9 in prose.",
   );
   expect(withoutStackNote("Closes #4")).toBe("Closes #4");
+});
+group("gate", () => {
+  const passing: RunArtefacts = {
+    issue: { number: 7 },
+    review: "## Standards\n\nS1 (should fix): rename it.\n\n## Spec\n\nP1 (won't fix: belongs to #9): add a flag.\n",
+    prBody: "Closes #7\n\n![menu](./out/verify/menu.png)\n\n## Follow-ups\n\n- P1: a flag, in #9\n",
+    pr: { title: "Menu: add it", attach: ["out/verify/menu.png"] },
+    commits: ["Menu: add it (#7)", "Menu: rename it"],
+    evidenceDir: "out/verify",
+    evidence: ["out/verify/menu.png"],
+    issueExists: (issue) => issue === 7 || issue === 9,
+  };
+  const rules = (artefacts: Partial<RunArtefacts>): string[] =>
+    gate({ ...passing, ...artefacts }).map(({ rule }) => rule);
+
+  test("passes a run that keeps every rule", () => {
+    expect(gate(passing)).toEqual([]);
+  });
+
+  test("fails a won't-fix spec finding that names no issue", () => {
+    expect(rules({ review: "## Spec\n\nP1 (won't fix: not worth it): add a flag.\n" })).toEqual(["wont-fix-issue"]);
+  });
+
+  test("passes a won't-fix spec finding that is wrong", () => {
+    expect(rules({ review: "## Spec\n\nP1 (won't fix: wrong, the flag exists): add a flag.\n" })).toEqual([]);
+  });
+
+  test("fails a won't-fix spec finding naming an issue that does not exist", () => {
+    expect(rules({ review: "## Spec\n\nP1 (won't fix: belongs to #404): add a flag.\n" })).toEqual(["wont-fix-issue"]);
+  });
+
+  test("leaves won't-fix standards findings alone", () => {
+    expect(rules({ review: "## Standards\n\nS1 (won't fix: not worth it): rename.\n\n## Spec\n\nNone.\n" })).toEqual(
+      [],
+    );
+  });
+
+  test("fails a follow-up without an issue link", () => {
+    expect(rules({ prBody: "Closes #7\n\n## Follow-ups\n\n- P1: a flag, later\n" })).toEqual(["follow-up-link"]);
+    expect(rules({ prBody: "Closes #7\n\n## Follow-ups\n\n- P1: https://github.com/a/b/issues/9\n" })).toEqual([]);
+  });
+
+  test("fails a body path missing from disk", () => {
+    expect(rules({ evidence: [] })).toEqual(["evidence", "evidence"]);
+  });
+
+  test("fails a body path missing from attach, and an attach entry missing from disk", () => {
+    expect(rules({ pr: { title: "t", attach: [] } })).toEqual(["evidence"]);
+    expect(rules({ pr: { title: "t", attach: ["out/verify/menu.png", "out/verify/gone.png"] } })).toEqual(["evidence"]);
+  });
+
+  test("fails a commit naming another issue", () => {
+    expect(rules({ commits: ["Menu: add it (#7)", "Lobby: fix the timer (#8)"] })).toEqual(["foreign-commit"]);
+  });
+
+  test("fails a missing or malformed pr.json", () => {
+    expect(rules({ pr: null })).toEqual(["pr-json"]);
+  });
+
+  test("a failed gate sends the rerun back to fix", () => {
+    const progress = { done: ["feedback", "setup", "implement", "review", "fix", "check", "pr"], green: true };
+    expect(rewind(progress)).toEqual({ done: ["feedback", "setup", "implement", "review"], gated: true });
+  });
 });
