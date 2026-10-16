@@ -112,8 +112,11 @@ export function order(
   return { order: placed, cycles: issues.filter((issue) => bad.has(issue)) };
 }
 
-/** Where a batch issue is: running, published (has a PR to stack on), or failed, stopped or skipped. */
-export type Status = "running" | "published" | "failed";
+/**
+ * Where a batch issue is: queued (not started; a bug waits in its own lane), running, published (has
+ * a PR to stack on, or is merged), or failed, which covers stopped and skipped too.
+ */
+export type Status = "queued" | "running" | "published" | "failed";
 
 /**
  * The next issue in `queue` that may start: the first whose in-batch blockers have all published.

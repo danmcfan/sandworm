@@ -163,6 +163,10 @@ group("stack: batch order", () => {
     expect(nextIssue(["1"], blockedBy, new Map([["3", "published"]]))).toEqual({ start: "1", skip: [] });
   });
 
+  test("a blocker queued in another lane (a bug) is waited for", () => {
+    expect(nextIssue(["1"], new Map([["1", ["7"]]]), new Map([["7", "queued"]]))).toEqual({ skip: [] });
+  });
+
   test("an issue whose blocker failed is skipped", () => {
     const next = nextIssue(["1", "2"], new Map([["1", ["3"]]]), new Map([["3", "failed"]]));
     expect(next).toEqual({ start: "2", skip: [{ issue: "1", reason: "blocker #3 did not publish" }] });
