@@ -206,7 +206,8 @@ export async function mergeIn(cwd: string, ref: string): Promise<boolean> {
 const isAncestorOnOrigin: IsAncestor = async (ancestor, descendant) =>
   (await $`git merge-base --is-ancestor origin/${ancestor} origin/${descendant}`.nothrow().quiet()).exitCode === 0;
 
-export const tipOf = async (ref: string): Promise<string> => (await $`git rev-parse ${ref}`.quiet().text()).trim();
+export const tipOf = async (ref: string, cwd = "."): Promise<string> =>
+  (await $`git rev-parse ${ref}`.cwd(cwd).quiet().text()).trim();
 
 /** An open PR, with what the pipeline needs to match it to issues. */
 interface OpenPr extends Pr {

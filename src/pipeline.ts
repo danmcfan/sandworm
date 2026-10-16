@@ -272,6 +272,22 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
   const parent = progress.parent;
   if (exists && parent !== undefined) {
     enter("setup");
+    // Until the push, a failed restack puts the branch back, so state.json (which still names the
+    // parent and its sha) matches the branch and the next run restacks from the same place.
+    const before = await tipOf("HEAD", worktree);
+    const pushed = published ? await tipOf(`origin/${branch}`) : undefined;
+    try {
+      await restack(parent);
+    } catch (error) {
+      const moved = published && (await tipOf(`origin/${branch}`)) !== pushed;
+      if (!moved) await $`git reset -q --hard ${before}`.cwd(worktree).nothrow().quiet();
+      throw error;
+    }
+    tui.done("setup");
+  }
+  if (restackOnly) return progress;
+
+  async function restack(parent: Parent): Promise<void> {
     const view: unknown = await $`gh pr view ${parent.pr} --json state,headRefOid`.quiet().json();
     const { state, head } = prState(view);
     if (state === "MERGED") {
@@ -308,9 +324,7 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
     } else if (state === "CLOSED") {
       tui.activity(`\u001B[33mparent PR #${parent.pr} was closed unmerged\u001B[0m; the branch still holds its work`);
     }
-    tui.done("setup");
   }
-  if (restackOnly) return progress;
 
   await phase("implement", "Opus", async () => {
     if (answering) await step("implement", `address-${progress.rounds}`, OPUS, "address.md");
