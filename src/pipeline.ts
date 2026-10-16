@@ -1,8 +1,9 @@
 import { claudeCode, createSandbox, type SandboxRunResult } from "@ai-hero/sandcastle";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { $ } from "bun";
-import { cpSync, existsSync, rmSync } from "node:fs";
+import { cpSync, existsSync, readdirSync, rmSync } from "node:fs";
 import { argsFor, promptPath, type Resolved } from "./config.ts";
+import { gate, report, rewind, type RunArtefacts } from "./gate.ts";
 import { describe, journal } from "./journal.ts";
 import type { Tui } from "./tui.ts";
 
@@ -10,12 +11,14 @@ import type { Tui } from "./tui.ts";
 //
 // One container, one branch (config.branch, cut from config.base):
 //   implement (Opus) → review and triage (Opus) → fix (Sonnet) → check, refixing up to 3 times → PR body (Sonnet)
+//   → gate (src/gate.ts)
 // then it pushes the branch and opens the PR. It is a draft if the check is still red.
 // A branch with no commits (an audit that only filed issues) gets the PR body as an issue comment instead.
 // Each agent's full output goes to .sandcastle/logs/<issue>/, and every failure or stop to its error.log.
 //
 // Running the same issue again skips the steps an earlier run finished (kept in
 // .sandcastle/logs/<issue>/state.json) and starts the stopped step over on the same branch.
+// A gate failure is the exception: its rerun starts at fix, with out/pipeline/gate.md as the task.
 // `fresh` forgets those and starts from implement; the branch keeps its commits.
 //
 // Running it again once the PR is open starts a feedback round if the owner (the `gh` user) has
@@ -26,7 +29,7 @@ const MAX_FIX_ROUNDS = 3;
 const OPUS = claudeCode("claude-opus-5-5", { effort: "low" });
 const SONNET = claudeCode("claude-sonnet-5-5", { effort: "low" });
 
-export const STEPS = ["feedback", "setup", "implement", "review", "fix", "check", "pr", "publish"] as const;
+export const STEPS = ["feedback", "setup", "implement", "review", "fix", "check", "pr", "gate", "publish"] as const;
 
 /** The parts of the progress view the pipeline drives. */
 export type Reporter = Omit<Tui, "close">;
@@ -41,6 +44,8 @@ export interface Progress {
   rounds?: number;
   /** When the newest owner comment a feedback round took in was made, as ISO 8601. */
   feedbackSeen?: string;
+  /** The gate failed, so fix works from out/pipeline/gate.md. */
+  gated?: boolean;
   /** How the last run ended, if it did not finish; error.log has the whole story. */
   failed?: { step: string; at: string; error: string };
 }
@@ -152,13 +157,17 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
   }
   tui.done("setup");
 
-  const record = async (name: string, extra: Omit<Progress, "done"> = {}): Promise<void> => {
-    progress = { ...progress, ...extra, done: [...progress.done, name] };
+  // Writes state.json and saves the kept directories.
+  const save = async (): Promise<void> => {
     await Bun.write(stateFile, JSON.stringify(progress, null, 2));
     for (const dir of config.keep) {
       const live = `${sandbox.worktreePath}/${dir}`;
       if (existsSync(live)) cpSync(live, saved(dir), { recursive: true, force: true });
     }
+  };
+  const record = async (name: string, extra: Omit<Progress, "done"> = {}): Promise<void> => {
+    progress = { ...progress, ...extra, done: [...progress.done, name] };
+    await save();
   };
 
   // One pipeline step: skipped if an earlier run finished it, recorded once it is done.
@@ -215,7 +224,10 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
   });
   await phase("fix", "Sonnet", async () => {
     await step("fix", "fix", SONNET, "fix.md", {
-      TASK: "The review findings are in `out/pipeline/review.md`. If it says `No findings.`, write that to `out/pipeline/fixes.md` and stop.",
+      TASK:
+        progress.gated === true
+          ? "The PR was not published: the run broke the gate rules in `out/pipeline/gate.md`. Each line is one item; use its rule as the id."
+          : "The review findings are in `out/pipeline/review.md`. If it says `No findings.`, write that to `out/pipeline/fixes.md` and stop.",
     });
   });
 
@@ -246,6 +258,18 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
 
   await phase("pr", "Sonnet", async () => {
     await step("pr", "pr", SONNET, "pr.md", { CHECK: green ? "passing" : "FAILING" });
+  });
+
+  await phase("gate", "won't-fix, follow-ups, evidence, commits", async () => {
+    const failures = gate(await artefacts(sandbox.worktreePath, issue, config.compare, config.args["EVIDENCE"] ?? ""));
+    if (failures.length === 0) {
+      delete progress.gated;
+      return;
+    }
+    await Bun.write(`${out}/pipeline/gate.md`, `${report(failures)}\n`);
+    progress = rewind(progress);
+    await save();
+    throw new Error(`the gate failed; no PR opened. Rerun to fix:\n${report(failures)}`);
   });
 
   enter("publish");
@@ -287,6 +311,54 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
     }
   }
   return progress;
+}
+
+// The run's outputs and the facts about them the gate needs, from the worktree and `gh`.
+async function artefacts(worktree: string, issue: string, compare: string, evidenceDir: string): Promise<RunArtefacts> {
+  const pipeline = `${worktree}/out/pipeline`;
+  const read = async (file: string): Promise<string> =>
+    existsSync(`${pipeline}/${file}`) ? Bun.file(`${pipeline}/${file}`).text() : "";
+  const pr: unknown = await Bun.file(`${pipeline}/pr.json`).json();
+  if (!isPrSpec(pr)) throw new Error(`${pipeline}/pr.json is not {"title": string, "attach": string[]}`);
+  const lines = async (command: ReturnType<typeof $>): Promise<string[]> =>
+    (await command.cwd(worktree).quiet().text()).split("\n").filter(Boolean);
+  const shown: unknown = JSON.parse(await $`gh issue view ${issue} --json number,labels,body,comments`.quiet().text());
+  const {
+    labels = [],
+    body = "",
+    comments = [],
+  } = shown as {
+    labels?: { name: string }[];
+    body?: string;
+    comments?: { body: string }[];
+  };
+  const review = await read("review.md");
+  const exists = new Map<number, boolean>();
+  for (const match of review.matchAll(/#(\d+)\b/gu)) {
+    const number = Number(match[1]);
+    if (!exists.has(number))
+      exists.set(number, (await $`gh issue view ${number} --json number`.nothrow().quiet()).exitCode === 0);
+  }
+  const dir = `${worktree}/${evidenceDir}`;
+  return {
+    issue: {
+      number: Number(issue),
+      labels: labels.map(({ name }) => name),
+      body,
+      comments: comments.map((c) => c.body),
+    },
+    review,
+    fixes: await read("fixes.md"),
+    prBody: await read("pr-body.md"),
+    pr,
+    commits: await lines($`git log --format=%s ${compare}..HEAD`),
+    changedFiles: await lines($`git diff --name-only ${compare}...HEAD`),
+    evidenceDir,
+    evidence: existsSync(dir)
+      ? readdirSync(dir, { recursive: true, encoding: "utf8" }).map((path) => `${evidenceDir}/${path}`)
+      : [],
+    issueExists: (number) => exists.get(number) ?? false,
+  };
 }
 
 interface Feedback {

@@ -16,11 +16,12 @@ Final `bun run check`: **{{CHECK}}**.
 3. Use the `/pr` skill to write the body to `out/pipeline/pr-body.md`. Add:
    - `Closes #{{ISSUE_NUMBER}}` near the top.
    - A `## Review` section: each review finding and what happened to it, from `fixes.md`.
-   - A `## Follow-ups` section, if any finding is **won't fix** or was skipped: each one with its reason and the issue it belongs to, if named.
+   - A `## Follow-ups` section, if any finding is **won't fix** or was skipped: each one with its reason and a link (`#N`) to the issue it belongs to. If it has none yet, file one with `gh issue create` and link that. An entry with no link stops the run.
    - If the check failed, a `## Check failing` section saying what is still red.
    - Last line: `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
      Reference each picked file by its path from the repo root: `![what it shows](./{{EVIDENCE}}/<path>)`.
-4. Write `out/pipeline/pr.json`: `{"title": "...", "attach": ["{{EVIDENCE}}/<path>", ...]}`. The title follows `git log` style (`Area: what changed`). `attach` lists every file the body references.
+     Confirm every claim about the code with a search (`git grep`, `git diff`) before writing it.
+4. Write `out/pipeline/pr.json`: `{"title": "...", "attach": ["{{EVIDENCE}}/<path>", ...]}`. The title follows `git log` style (`Area: what changed`). `attach` lists every file the body references, and each must exist.
 
 # Done
 
