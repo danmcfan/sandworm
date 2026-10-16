@@ -2,7 +2,7 @@ import { describe as group, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { expand } from "../src/batch.ts";
+import { expand, holdReason, takeUnblocked, triage } from "../src/batch.ts";
 import { argsFor, promptPath, resolve } from "../src/config.ts";
 import { journal } from "../src/journal.ts";
 import { gate, rewind, type RunArtefacts } from "../src/gate.ts";
@@ -21,6 +21,7 @@ group("resolve", () => {
     expect(resolved.keep).toEqual(["out"]);
     expect(resolved.workers).toBe(1);
     expect(resolved.mergeBugs).toBe(false);
+    expect(resolved.skipLabels).toEqual(["needs-owner"]);
   });
 
   test("compares against origin/main when branches are cut from it", () => {
@@ -130,5 +131,52 @@ group("gate", () => {
   test("a failed gate sends the rerun back to fix", () => {
     const progress = { done: ["feedback", "setup", "implement", "review", "fix", "check", "pr"], green: true };
     expect(rewind(progress)).toEqual({ done: ["feedback", "setup", "implement", "review"], gated: true });
+  });
+});
+
+group("issue selection", () => {
+  const issue = (number: number, ...labels: string[]) => ({
+    number,
+    state: "OPEN",
+    labels: ["ready-for-agent", ...labels].map((name) => ({ name })),
+  });
+
+  test("skips issues carrying a skipLabels label, and closed or unready ones", () => {
+    const closed = { ...issue(4), state: "CLOSED" };
+    const { ready, skipped } = triage(
+      [issue(1), issue(2, "needs-owner"), issue(3, "art"), closed],
+      ["needs-owner", "art"],
+    );
+    expect(ready.map(({ number }) => number)).toEqual([1]);
+    expect(skipped).toEqual(["#2 (needs-owner)", "#3 (art)", "#4 (not open and ready-for-agent)"]);
+  });
+
+  test("takes the first queued issue with no open blocker, and a blocked one once its blocker closes", async () => {
+    const open = new Set([1]);
+    const blockers: Record<string, number[]> = { "5": [1], "6": [] };
+    const openBlockers = async (n: string) => (blockers[n] ?? []).filter((b) => open.has(b));
+    const queue = ["5", "6"];
+    expect(await takeUnblocked(queue, openBlockers)).toBe("6");
+    expect(await takeUnblocked(queue, openBlockers)).toBeUndefined();
+    expect(queue).toEqual(["5"]);
+    open.delete(1);
+    expect(await takeUnblocked(queue, openBlockers)).toBe("5");
+    expect(queue).toEqual([]);
+  });
+});
+
+group("mergeBugs hold", () => {
+  test("a won't-fix spec finding holds the PR open", () => {
+    const review = "## Standards\n\nS1 won't fix: style.\n\n## Spec\n\nP1 **won't fix: belongs to #9** src/a.ts:3\n";
+    expect(holdReason(review)).toContain("won't-fix spec finding");
+  });
+
+  test("an Owner decision: note holds the PR open", () => {
+    expect(holdReason("## Spec\n\nP1 should fix. Owner decision: which colour?\n")).toContain("owner decision");
+  });
+
+  test("a clean review, or a won't-fix only on standards, merges", () => {
+    expect(holdReason("No findings.")).toBeNull();
+    expect(holdReason("## Standards\n\nS1 won't fix: style.\n\n## Spec\n\nP1 must fix: x.\n")).toBeNull();
   });
 });

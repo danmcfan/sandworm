@@ -31,7 +31,7 @@ export default defineConfig({
     reverify: "If a fix changes what the player sees or hears, rerun the verify check for it.",
     evidence: "out/verify",
   },
-  batch: { workers: 2, mergeBugs: true },
+  batch: { workers: 2, mergeBugs: true }, // skipLabels: ["needs-owner"], the default
 });
 ```
 

@@ -26,14 +26,17 @@ const MAX_SYNCS = 2;
 /**
  * `bun run sandcastle:batch [issues ...] [--workers N] [--fresh]`, where each issue is a number
  * (`12`) or an inclusive range (`10-20`). With none it takes every open ready-for-agent issue,
- * oldest first; a named issue that is closed, missing or lacks that label is skipped.
+ * oldest first; a named issue that is closed, missing or lacks that label is skipped, and so is any
+ * issue with a config.batch.skipLabels label (default `needs-owner`). An issue is started only
+ * once every issue blocking it (GitHub issue dependencies) is closed.
  *
  * Each issue goes through the same pipeline as the single-issue runner, up to N at a time
  * (config.batch.workers, default 1). With config.batch.mergeBugs, bug issues (label `bug`) run
  * one at a time, never alongside another bug: each is cut from a freshly fetched origin/main and,
  * once its PR is green and CI passes, merged (squash) before the next bug starts, so every bug fix
  * builds on the ones before it. If main moves on and the PR comes to conflict with it, an agent
- * merges main in (sync.md) and CI runs again. Other issues stop at an open PR for the owner.
+ * merges main in (sync.md) and CI runs again. A bug whose review left a spec finding won't-fix or an
+ * `Owner decision:` note stays open instead. Other issues stop at an open PR for the owner.
  *
  * Ctrl-C stops every agent and removes the containers; a second Ctrl-C force-removes them and quits.
  * Rerunning carries each issue on from where it stopped, as the single-issue runner does.
@@ -65,9 +68,7 @@ export async function runBatch(config: Config, args = process.argv.slice(2)): Pr
         ].flat();
   const listed = fetched.filter((value) => isIssue(value));
   const has = (issue: Issue, label: string): boolean => issue.labels.some(({ name }) => name === label);
-  const runnable = (issue: Issue): boolean => issue.state === "OPEN" && has(issue, READY);
-  const skipped = listed.filter((issue) => !runnable(issue)).map(({ number }) => `#${number}`);
-  const ready = listed.filter((issue) => runnable(issue));
+  const { ready, skipped } = triage(listed, resolved.skipLabels);
   if (ready.length === 0)
     throw new Error(`No open ${READY} issues to run${skipped.length > 0 ? ` (skipped ${skipped.join(", ")})` : ""}.`);
 
@@ -76,7 +77,7 @@ export async function runBatch(config: Config, args = process.argv.slice(2)): Pr
   const others = ready.filter((issue) => !isBug(issue)).map(({ number }) => String(number));
 
   const batch = new Batch(resolved, fresh, bugs, others, workers);
-  if (skipped.length > 0) batch.tui.activity(`Skipped, not open and ${READY}: ${skipped.join(", ")}`);
+  if (skipped.length > 0) batch.tui.activity(`Skipped: ${skipped.join(", ")}`);
   batch.skipped = skipped;
   await batch.run();
 }
@@ -147,16 +148,18 @@ class Batch {
 
   // Each worker takes the next bug if no bug is running, otherwise the next other issue. A worker
   // with only a busy bug lane left stops; the worker holding the lane carries on through the bugs.
+  // An issue with an open blocker waits in its queue, and is taken once the blocker closes (say, a
+  // bug merged before it); one still blocked when the queues run dry is never started.
   private async worker(): Promise<void> {
     if (this.stop.signal.aborted) return;
-    const bug = this.bugRunning ? undefined : this.bugs.shift();
+    const bug = this.bugRunning ? undefined : await takeUnblocked(this.bugs, openBlockers);
     if (bug !== undefined) {
       this.bugRunning = true;
       await this.runOne(bug, true);
       this.bugRunning = false;
       return this.worker();
     }
-    const issue = this.others.shift();
+    const issue = await takeUnblocked(this.others, openBlockers);
     if (issue === undefined) return;
     await this.runOne(issue, false);
     return this.worker();
@@ -189,7 +192,9 @@ class Batch {
         return;
       }
       at("merge");
-      const left = await this.land(issue, url, reporter);
+      const review = Bun.file(`${logsFor(issue)}/out/pipeline/review.md`);
+      const held = (await review.exists()) ? holdReason(await review.text()) : null;
+      const left = held ?? (await this.land(issue, url, reporter));
       if (left === null) {
         tui.set(issue, "done", "merge", "merged");
         this.results.set(issue, `Merged: ${url}`);
@@ -288,7 +293,8 @@ class Batch {
   report(): string[] {
     return [
       ...[...this.results].map(([issue, result]) => `#${issue}  ${result}  (logs: ${logsFor(issue)}/)`),
-      ...(this.skipped.length > 0 ? [`Skipped, not open and ${READY}: ${this.skipped.join(", ")}`] : []),
+      ...(this.skipped.length > 0 ? [`Skipped: ${this.skipped.join(", ")}`] : []),
+      ...[...this.bugs, ...this.others].map((issue) => `#${issue}  Not started: blocked by an open issue`),
     ];
   }
 }
@@ -319,6 +325,54 @@ function prChecks(view: unknown): { mergeable: string; checks: ("pending" | "pas
     return ["SUCCESS", "SKIPPED", "NEUTRAL"].includes(field("conclusion")) ? "passed" : "failed";
   });
   return { mergeable, checks };
+}
+
+/** Splits issues into those to run and the rest, each skipped one as `#n (why)`. */
+export function triage(issues: Issue[], skipLabels: string[]): { ready: Issue[]; skipped: string[] } {
+  const ready: Issue[] = [];
+  const skipped: string[] = [];
+  for (const issue of issues) {
+    const names = issue.labels.map(({ name }) => name);
+    const owner = names.filter((name) => skipLabels.includes(name));
+    if (issue.state !== "OPEN" || !names.includes(READY)) skipped.push(`#${issue.number} (not open and ${READY})`);
+    else if (owner.length > 0) skipped.push(`#${issue.number} (${owner.join(", ")})`);
+    else ready.push(issue);
+  }
+  return { ready, skipped };
+}
+
+/** Removes and returns the first issue in `queue` with no open blocker, if there is one. */
+export async function takeUnblocked(
+  queue: string[],
+  blockers: (issue: string) => Promise<number[]>,
+): Promise<string | undefined> {
+  for (const [i, issue] of queue.entries()) {
+    if ((await blockers(issue)).length === 0) return queue.splice(i, 1)[0];
+  }
+  return undefined;
+}
+
+// The open issues that block this one, from GitHub's issue dependencies.
+async function openBlockers(issue: string): Promise<number[]> {
+  const text =
+    await $`gh api repos/{owner}/{repo}/issues/${issue}/dependencies/blocked_by --jq ${'.[] | select(.state == "open") | .number'}`
+      .quiet()
+      .text();
+  return text
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .map(Number);
+}
+
+/**
+ * Why a bug's review report keeps its PR open for the owner rather than merged, or null: a won't-fix
+ * finding under `## Spec` (part of the issue left undone) or any `Owner decision:` note.
+ */
+export function holdReason(review: string): string | null {
+  if (/Owner decision:/u.test(review)) return "review has an owner decision";
+  const spec = /^## Spec\b([\s\S]*?)(?=^## |$(?![\s\S]))/mu.exec(review)?.[1] ?? "";
+  if (/won['’]t fix/iu.test(spec)) return "review has a won't-fix spec finding";
+  return null;
 }
 
 /** `12` → [12]; `10-20` → [10, 11, …, 20]. */
