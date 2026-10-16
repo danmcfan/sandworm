@@ -89,9 +89,14 @@ function foreignCommit({ commits, issue }: RunArtefacts): GateFailure[] {
 
 const RULES = [prSpec, wontFixIssue, followUpLink, evidence, foreignCommit];
 
-/** Every rule the run's outputs break; none means it may publish. */
-export function gate(artefacts: RunArtefacts): GateFailure[] {
-  return RULES.flatMap((rule) => rule(artefacts));
+/** A gate rule: the failures it finds in the run's outputs. A repo adds its own through `gates`. */
+export type GateRule = (artefacts: RunArtefacts) => GateFailure[] | Promise<GateFailure[]>;
+
+/** Every rule the run's outputs break, built-in then the repo's own; none means it may publish. */
+export async function gate(artefacts: RunArtefacts, repoRules: GateRule[] = []): Promise<GateFailure[]> {
+  const failures = RULES.flatMap((rule) => rule(artefacts));
+  for (const rule of repoRules) failures.push(...(await rule(artefacts)));
+  return failures;
 }
 
 /** gate.md and error.log: one failure per line, with the rule it broke. */

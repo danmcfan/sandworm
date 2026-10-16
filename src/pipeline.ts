@@ -261,7 +261,8 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
   });
 
   await phase("gate", "won't-fix, follow-ups, evidence, commits", async () => {
-    const failures = gate(await artefacts(sandbox.worktreePath, issue, config.compare, config.args["EVIDENCE"] ?? ""));
+    const run = await artefacts(sandbox.worktreePath, issue, config.compare, config.args["EVIDENCE"] ?? "");
+    const failures = await gate(run, config.gates);
     if (failures.length === 0) {
       delete progress.gated;
       return;
