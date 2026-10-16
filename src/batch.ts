@@ -92,6 +92,7 @@ class Batch {
   skipped: string[] = [];
   private setups: Promise<unknown> = Promise.resolve();
   private bugRunning = false;
+  private readonly blockedBy = new Map<string, number[]>();
 
   readonly config: Resolved;
   readonly fresh: boolean;
@@ -152,14 +153,14 @@ class Batch {
   // bug merged before it); one still blocked when the queues run dry is never started.
   private async worker(): Promise<void> {
     if (this.stop.signal.aborted) return;
-    const bug = this.bugRunning ? undefined : await takeUnblocked(this.bugs, openBlockers);
+    const bug = this.bugRunning ? undefined : await takeUnblocked(this.bugs, openBlockers, this.blockedBy);
     if (bug !== undefined) {
       this.bugRunning = true;
       await this.runOne(bug, true);
       this.bugRunning = false;
       return this.worker();
     }
-    const issue = await takeUnblocked(this.others, openBlockers);
+    const issue = await takeUnblocked(this.others, openBlockers, this.blockedBy);
     if (issue === undefined) return;
     await this.runOne(issue, false);
     return this.worker();
@@ -294,7 +295,11 @@ class Batch {
     return [
       ...[...this.results].map(([issue, result]) => `#${issue}  ${result}  (logs: ${logsFor(issue)}/)`),
       ...(this.skipped.length > 0 ? [`Skipped: ${this.skipped.join(", ")}`] : []),
-      ...[...this.bugs, ...this.others].map((issue) => `#${issue}  Not started: blocked by an open issue`),
+      ...[...this.bugs, ...this.others].map((issue) => {
+        if (this.stop.signal.aborted) return `#${issue}  Not started: interrupted`;
+        const blockers = this.blockedBy.get(issue) ?? [];
+        return `#${issue}  Not started: blocked by ${blockers.map((n) => `#${n}`).join(", ") || "an open issue"}`;
+      }),
     ];
   }
 }
@@ -341,24 +346,32 @@ export function triage(issues: Issue[], skipLabels: string[]): { ready: Issue[];
   return { ready, skipped };
 }
 
-/** Removes and returns the first issue in `queue` with no open blocker, if there is one. */
+/** Removes and returns the first issue in `queue` with no open blocker, if there is one; blockers found are recorded in `found`. */
 export async function takeUnblocked(
   queue: string[],
   blockers: (issue: string) => Promise<number[]>,
+  found = new Map<string, number[]>(),
 ): Promise<string | undefined> {
   for (const [i, issue] of queue.entries()) {
-    if ((await blockers(issue)).length === 0) return queue.splice(i, 1)[0];
+    const open = await blockers(issue);
+    found.set(issue, open);
+    if (open.length === 0) return queue.splice(i, 1)[0];
   }
   return undefined;
 }
 
 // The open issues that block this one, from GitHub's issue dependencies.
 async function openBlockers(issue: string): Promise<number[]> {
-  const text =
+  const result =
     await $`gh api repos/{owner}/{repo}/issues/${issue}/dependencies/blocked_by --jq ${'.[] | select(.state == "open") | .number'}`
-      .quiet()
-      .text();
-  return text
+      .nothrow()
+      .quiet();
+  if (result.exitCode !== 0) {
+    console.warn(`Could not read blockers of #${issue}, treating it as unblocked: ${result.stderr.toString().trim()}`);
+    return [];
+  }
+  return result
+    .text()
     .split("\n")
     .filter((line) => line.trim() !== "")
     .map(Number);

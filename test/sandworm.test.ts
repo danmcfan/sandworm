@@ -163,6 +163,13 @@ group("issue selection", () => {
     expect(await takeUnblocked(queue, openBlockers)).toBe("5");
     expect(queue).toEqual([]);
   });
+
+  test("records the open blockers it finds for each issue", async () => {
+    const found = new Map<string, number[]>();
+    const queue = ["5", "6"];
+    await takeUnblocked(queue, async (n) => (n === "5" ? [1, 2] : []), found);
+    expect(found.get("5")).toEqual([1, 2]);
+  });
 });
 
 group("mergeBugs hold", () => {
