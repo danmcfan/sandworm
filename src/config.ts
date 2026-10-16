@@ -40,6 +40,8 @@ export interface Config {
      * latest origin/main. Defaults to false: every issue stops at an open PR.
      */
     mergeBugs?: boolean;
+    /** Issues carrying any of these labels wait for the owner and are left out. Defaults to ["needs-owner"]. */
+    skipLabels?: string[];
   };
 }
 
@@ -53,6 +55,7 @@ export interface Resolved {
   compare: string;
   workers: number;
   mergeBugs: boolean;
+  skipLabels: string[];
   gates: GateRule[];
   /** The prompt args every prompt may use. */
   args: Record<string, string>;
@@ -71,6 +74,7 @@ export function resolve(config: Config): Resolved {
     compare,
     workers: config.batch?.workers ?? 1,
     mergeBugs: config.batch?.mergeBugs ?? false,
+    skipLabels: config.batch?.skipLabels ?? ["needs-owner"],
     gates: config.gates ?? [],
     args: {
       REPO: config.repo,
