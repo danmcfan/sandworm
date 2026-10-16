@@ -411,6 +411,21 @@ group("gate", () => {
     ]);
   });
 
+  test("skips the review's summary line in the spec section", async () => {
+    const review =
+      "## Spec\n\nP1. Add a flag. won't fix: wrong, the flag exists.\n\nSummary: Standards 5 findings (4 should fix, 1 won't fix); Spec 1 finding (won't fix: wrong).\n";
+    expect(await rules({ review })).toEqual([]);
+  });
+
+  test("checks bold and listed spec findings", async () => {
+    expect(await rules({ review: "## Spec\n\n**P1. Add a flag.** won't fix: belongs elsewhere\n" })).toEqual([
+      "wont-fix-issue",
+    ]);
+    const failures = await gate({ ...passing, review: "## Spec\n\n- P1. Add a flag. won't fix: belongs to #404\n" });
+    expect(failures.map(({ rule }) => rule)).toEqual(["wont-fix-issue"]);
+    expect(failures[0]?.message).toContain("does not exist");
+  });
+
   test("leaves won't-fix standards findings alone", async () => {
     expect(
       await rules({ review: "## Standards\n\nS1 (won't fix: not worth it): rename.\n\n## Spec\n\nNone.\n" }),

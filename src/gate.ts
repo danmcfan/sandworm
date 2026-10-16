@@ -39,17 +39,23 @@ function section(markdown: string, heading: string): string[] {
   return end === -1 ? rest : rest.slice(0, end);
 }
 
+// A line that opens a review finding: its id, such as `P1`, `**P1.` or `- P1`.
+const FINDING = /^\s*(?:[-*+]\s+)?\**[A-Z]\d+\b/u;
+
 // A won't-fix spec finding must name an issue that exists, unless the finding itself is wrong.
+// Only finding lines count, so the closing `Summary:` line and other prose are skipped.
 function wontFixIssue({ review, issueExists }: RunArtefacts): GateFailure[] {
-  return section(review, "Spec").flatMap((line) => {
-    const verdict = /won['’]t fix:?\s*(.*)/iu.exec(line);
-    if (verdict === null) return [];
-    if (/^wrong\b/iu.test(verdict[1] ?? "")) return [];
-    const named = issuesIn(line);
-    const missing = named.filter((issue) => !issueExists(issue));
-    if (named.length === 0) return [{ rule: "wont-fix-issue", message: `names no issue: ${line.trim()}` }];
-    return missing.map((issue) => ({ rule: "wont-fix-issue", message: `#${issue} does not exist: ${line.trim()}` }));
-  });
+  return section(review, "Spec")
+    .filter((line) => FINDING.test(line))
+    .flatMap((line) => {
+      const verdict = /won['’]t fix:?\s*(.*)/iu.exec(line);
+      if (verdict === null) return [];
+      if (/^wrong\b/iu.test(verdict[1] ?? "")) return [];
+      const named = issuesIn(line);
+      const missing = named.filter((issue) => !issueExists(issue));
+      if (named.length === 0) return [{ rule: "wont-fix-issue", message: `names no issue: ${line.trim()}` }];
+      return missing.map((issue) => ({ rule: "wont-fix-issue", message: `#${issue} does not exist: ${line.trim()}` }));
+    });
 }
 
 // Each `## Follow-ups` entry links the issue it belongs to.
