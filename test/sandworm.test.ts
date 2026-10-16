@@ -22,6 +22,7 @@ group("resolve", () => {
     expect(resolved.workers).toBe(1);
     expect(resolved.mergeBugs).toBe(false);
     expect(resolved.skipLabels).toEqual(["needs-owner"]);
+    expect(resolved.gates).toEqual([]);
   });
 
   test("compares against origin/main when branches are cut from it", () => {
@@ -81,51 +82,90 @@ group("gate", () => {
     evidence: ["out/verify/menu.png"],
     issueExists: (issue) => issue === 7 || issue === 9,
   };
-  const rules = (artefacts: Partial<RunArtefacts>): string[] =>
-    gate({ ...passing, ...artefacts }).map(({ rule }) => rule);
+  const rules = async (artefacts: Partial<RunArtefacts>): Promise<string[]> =>
+    (await gate({ ...passing, ...artefacts })).map(({ rule }) => rule);
 
-  test("passes a run that keeps every rule", () => {
-    expect(gate(passing)).toEqual([]);
+  test("passes a run that keeps every rule", async () => {
+    expect(await gate(passing)).toEqual([]);
   });
 
-  test("fails a won't-fix spec finding that names no issue", () => {
-    expect(rules({ review: "## Spec\n\nP1 (won't fix: not worth it): add a flag.\n" })).toEqual(["wont-fix-issue"]);
+  test("runs the repo's rules after the built-in ones, sync and async, and fails on theirs", async () => {
+    const seen: RunArtefacts[] = [];
+    const { gates } = resolve({
+      ...config,
+      gates: [
+        (artefacts) => {
+          seen.push(artefacts);
+          return [{ rule: "screenshot", message: "no menu screenshot" }];
+        },
+        async () => [{ rule: "parity-trace", message: "trace differs" }],
+      ],
+    });
+    const failures = await gate({ ...passing, commits: ["Lobby: fix it (#8)"] }, gates);
+    expect(failures.map(({ rule }) => rule)).toEqual(["foreign-commit", "screenshot", "parity-trace"]);
+    expect(failures[1]).toEqual({ rule: "screenshot", message: "no menu screenshot" });
+    expect(seen[0]?.issue.number).toBe(7);
+    expect(await gate(passing, [() => []])).toEqual([]);
   });
 
-  test("passes a won't-fix spec finding that is wrong", () => {
-    expect(rules({ review: "## Spec\n\nP1 (won't fix: wrong, the flag exists): add a flag.\n" })).toEqual([]);
+  test("turns a throwing repo rule into a failure", async () => {
+    const failures = await gate(passing, [
+      () => {
+        throw new Error("boom");
+      },
+      async () => Promise.reject(new Error("nope")),
+    ]);
+    expect(failures.map(({ rule }) => rule)).toEqual(["repo-rule", "repo-rule"]);
+    expect(failures[0]?.message).toContain("rule 0 threw");
+    expect(failures[1]?.message).toContain("nope");
   });
 
-  test("fails a won't-fix spec finding naming an issue that does not exist", () => {
-    expect(rules({ review: "## Spec\n\nP1 (won't fix: belongs to #404): add a flag.\n" })).toEqual(["wont-fix-issue"]);
+  test("fails a won't-fix spec finding that names no issue", async () => {
+    expect(await rules({ review: "## Spec\n\nP1 (won't fix: not worth it): add a flag.\n" })).toEqual([
+      "wont-fix-issue",
+    ]);
   });
 
-  test("leaves won't-fix standards findings alone", () => {
-    expect(rules({ review: "## Standards\n\nS1 (won't fix: not worth it): rename.\n\n## Spec\n\nNone.\n" })).toEqual(
+  test("passes a won't-fix spec finding that is wrong", async () => {
+    expect(await rules({ review: "## Spec\n\nP1 (won't fix: wrong, the flag exists): add a flag.\n" })).toEqual([]);
+  });
+
+  test("fails a won't-fix spec finding naming an issue that does not exist", async () => {
+    expect(await rules({ review: "## Spec\n\nP1 (won't fix: belongs to #404): add a flag.\n" })).toEqual([
+      "wont-fix-issue",
+    ]);
+  });
+
+  test("leaves won't-fix standards findings alone", async () => {
+    expect(
+      await rules({ review: "## Standards\n\nS1 (won't fix: not worth it): rename.\n\n## Spec\n\nNone.\n" }),
+    ).toEqual([]);
+  });
+
+  test("fails a follow-up without an issue link", async () => {
+    expect(await rules({ prBody: "Closes #7\n\n## Follow-ups\n\n- P1: a flag, later\n" })).toEqual(["follow-up-link"]);
+    expect(await rules({ prBody: "Closes #7\n\n## Follow-ups\n\n- P1: https://github.com/a/b/issues/9\n" })).toEqual(
       [],
     );
   });
 
-  test("fails a follow-up without an issue link", () => {
-    expect(rules({ prBody: "Closes #7\n\n## Follow-ups\n\n- P1: a flag, later\n" })).toEqual(["follow-up-link"]);
-    expect(rules({ prBody: "Closes #7\n\n## Follow-ups\n\n- P1: https://github.com/a/b/issues/9\n" })).toEqual([]);
+  test("fails a body path missing from disk", async () => {
+    expect(await rules({ evidence: [] })).toEqual(["evidence", "evidence"]);
   });
 
-  test("fails a body path missing from disk", () => {
-    expect(rules({ evidence: [] })).toEqual(["evidence", "evidence"]);
+  test("fails a body path missing from attach, and an attach entry missing from disk", async () => {
+    expect(await rules({ pr: { title: "t", attach: [] } })).toEqual(["evidence"]);
+    expect(await rules({ pr: { title: "t", attach: ["out/verify/menu.png", "out/verify/gone.png"] } })).toEqual([
+      "evidence",
+    ]);
   });
 
-  test("fails a body path missing from attach, and an attach entry missing from disk", () => {
-    expect(rules({ pr: { title: "t", attach: [] } })).toEqual(["evidence"]);
-    expect(rules({ pr: { title: "t", attach: ["out/verify/menu.png", "out/verify/gone.png"] } })).toEqual(["evidence"]);
+  test("fails a commit naming another issue", async () => {
+    expect(await rules({ commits: ["Menu: add it (#7)", "Lobby: fix the timer (#8)"] })).toEqual(["foreign-commit"]);
   });
 
-  test("fails a commit naming another issue", () => {
-    expect(rules({ commits: ["Menu: add it (#7)", "Lobby: fix the timer (#8)"] })).toEqual(["foreign-commit"]);
-  });
-
-  test("fails a missing or malformed pr.json", () => {
-    expect(rules({ pr: null })).toEqual(["pr-json"]);
+  test("fails a missing or malformed pr.json", async () => {
+    expect(await rules({ pr: null })).toEqual(["pr-json"]);
   });
 
   test("a failed gate sends the rerun back to fix", () => {
