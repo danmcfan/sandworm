@@ -363,6 +363,8 @@ group("gate", () => {
     commits: ["Menu: add it (#7)", "Menu: rename it"],
     evidenceDir: "out/verify",
     evidence: ["out/verify/menu.png"],
+    worktree: "/tmp/worktree",
+    changed: ["src/menu.ts"],
   };
   const rules = async (artefacts: Partial<RunArtefacts>): Promise<string[]> =>
     (await gate({ ...passing, ...artefacts })).map(({ rule }) => rule);

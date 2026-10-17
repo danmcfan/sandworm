@@ -19,6 +19,10 @@ export interface RunArtefacts {
   evidenceDir: string;
   /** Every file under the evidence directory, from the repo root. */
   evidence: string[];
+  /** The run's worktree, absolute, so a rule can read the files the other fields name. */
+  worktree: string;
+  /** Files the branch changes against the compare base, from the repo root. */
+  changed: string[];
 }
 
 export interface GateFailure {

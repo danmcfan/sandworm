@@ -609,6 +609,8 @@ async function artefacts(
     evidence: existsSync(dir)
       ? readdirSync(dir, { recursive: true, encoding: "utf8" }).map((path) => `${evidenceDir}/${path}`)
       : [],
+    worktree,
+    changed: await lines($`git diff --name-only ${compare}...HEAD`),
   };
 }
 
