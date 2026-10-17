@@ -3,7 +3,7 @@ import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { $ } from "bun";
 import { cpSync, existsSync, readdirSync, rmSync } from "node:fs";
 import { argsFor, promptPath, type Resolved } from "./config.ts";
-import { gate, issuesIn, report, rewind, type RunArtefacts } from "./gate.ts";
+import { gate, report, rewind, type RunArtefacts } from "./gate.ts";
 import { describe, journal } from "./journal.ts";
 import {
   conflictTarget,
@@ -23,7 +23,7 @@ import type { Tui } from "./tui.ts";
 //
 // One container, one branch (config.branch, cut from config.base):
 //   implement (Opus) → review and triage (Opus) → fix (Sonnet) → check, refixing up to 3 times
-//   → stack → PR body (Sonnet) → gate (src/gate.ts)
+//   → stack → PR body (Sonnet) → gate (src/gate.ts), back to fix once if it fails
 // then it pushes the branch and opens the PR. It is a draft if the check is still red.
 //
 // A branch is stacked (see GLOSSARY.md and src/stack.ts) when its issue is blocked by another
@@ -31,12 +31,13 @@ import type { Tui } from "./tui.ts";
 // targets it. The stack step moves a branch that conflicts with an open PR onto that PR, before
 // anything is pushed. A rerun restacks: onto main once the parent has merged, or merging in the
 // parent's new commits. Bugs under mergeBugs (run.bug) never stack.
-// A branch with no commits (an audit that only filed issues) gets the PR body as an issue comment instead.
+// A branch with no commits (an audit with nothing to change) gets the PR body as an issue comment instead.
 // Each agent's full output goes to .sandcastle/logs/<issue>/, and every failure or stop to its error.log.
 //
 // Running the same issue again skips the steps an earlier run finished (kept in
 // .sandcastle/logs/<issue>/state.json) and starts the stopped step over on the same branch.
-// A gate failure is the exception: its rerun starts at fix, with out/pipeline/gate.md as the task.
+// A gate failure is the exception: the run goes back to fix once, with out/pipeline/gate.md as the
+// task, and if the gate fails again its rerun starts at fix the same way.
 // `fresh` forgets those and starts from implement; the branch keeps its commits.
 //
 // Running it again once the PR is open starts a feedback round if the owner (the `gh` user) has
@@ -44,6 +45,7 @@ import type { Tui } from "./tui.ts";
 // implement (address.md) → review → fix → check → PR body run again, then publish pushes and
 // rewrites the PR's title and body. With no new comments the run does nothing.
 const MAX_FIX_ROUNDS = 3;
+const MAX_GATE_ATTEMPTS = 2;
 const OPUS = claudeCode("claude-opus-5-5", { effort: "low" });
 const SONNET = claudeCode("claude-sonnet-5-5", { effort: "low" });
 
@@ -367,14 +369,6 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
   await phase("review", "Opus", async () => {
     await step("review", "review", OPUS, "review.md");
   });
-  await phase("fix", "Sonnet", async () => {
-    await step("fix", "fix", SONNET, "fix.md", {
-      TASK:
-        progress.gated === true
-          ? "The PR was not published: the run broke the gate rules in `out/pipeline/gate.md`. Each line is one item; use its rule as the id."
-          : "The review findings are in `out/pipeline/review.md`. If it says `No findings.`, write that to `out/pipeline/fixes.md` and stop.",
-    });
-  });
 
   // The fix agent is told to leave the check green; this makes sure, and refixes if not.
   const checkGreen = async (round: number): Promise<boolean> => {
@@ -397,63 +391,79 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
     else tui.fail("check", `red after ${MAX_FIX_ROUNDS} fix rounds; PR will be a draft`);
     return green;
   };
-  enter("check");
-  if (progress.done.includes("check")) tui.skip("check", "done in an earlier run");
-  else await record("check", { green: await runCheck() });
+  // A gate failure sends the run back to fix, with gate.md as its task, once more in this run.
+  for (let attempt = 1; ; attempt++) {
+    await phase("fix", "Sonnet", async () => {
+      await step("fix", "fix", SONNET, "fix.md", {
+        TASK:
+          progress.gated === true
+            ? "The PR was not published: the run broke the gate rules in `out/pipeline/gate.md`. Each line is one item; use its rule as the id."
+            : "The review findings are in `out/pipeline/review.md`. If it says `No findings.`, write that to `out/pipeline/fixes.md` and stop.",
+      });
+    });
 
-  // Which files the work touches is only known once it is done, so conflicts with other open PRs
-  // are checked here, before anything is pushed, while the branch can still be rebased.
-  enter("stack");
-  if (progress.done.includes("stack")) tui.skip("stack", "done in an earlier run");
-  else if (run.bug === true || !config.stack.conflicts || answering)
-    await skipStep("stack", run.bug === true ? "a bug lands on main alone" : "off");
-  else {
-    tui.start("stack", "trial-merging against open PRs");
-    const found = await conflictTarget(config, issue, worktree, progress.parent);
-    if (found !== undefined && found.parent === progress.parent) {
-      // Conflicts only with PRs it cannot also stack on; the PR body names them.
-      tui.done("stack", `stays on PR #${found.parent.pr}`);
-      await record("stack", { alsoConflicts: found.others.map(({ number }) => number) });
-    } else if (found === undefined) {
-      tui.done("stack", "no conflicts with open PRs");
-      await record("stack");
-    } else {
-      const { parent: target, others } = found;
-      tui.start("stack", `conflicts with PR #${target.pr}: rebasing onto ${target.branch}`);
-      // The branch's own commits start where it was cut: its parent, or the base (main for a HEAD base).
-      await restackOnto("stack", `origin/${target.branch}`, stackedOn() ?? (base === "HEAD" ? config.compare : base));
-      progress.parent = target;
-      const also = others.map(({ number }) => number);
-      await save();
-      enter("check");
-      const green = await runCheck();
-      tui.done("stack", `stacked on PR #${target.pr}`);
-      await record("stack", { green, ...(also.length === 0 ? {} : { alsoConflicts: also }) });
-    }
-  }
-  await phase("pr", "Sonnet", async () => {
-    await step("pr", "pr", SONNET, "pr.md", { CHECK: (progress.green ?? false) ? "passing" : "FAILING" });
-  });
+    enter("check");
+    if (progress.done.includes("check")) tui.skip("check", "done in an earlier run");
+    else await record("check", { green: await runCheck() });
 
-  await phase(
-    "gate",
-    "won't-fix, follow-ups, evidence, commits" + (config.gates.length > 0 ? ", repo rules" : ""),
-    async () => {
-      const failures = await gate(
-        // A stacked branch's commits are counted from its parent, as the prompts see them.
-        await artefacts(worktree, issue, stackedOn() ?? config.compare, config.args["EVIDENCE"] ?? ""),
-        config.gates,
-      );
-      if (failures.length === 0) {
-        delete progress.gated;
-        return;
+    // Which files the work touches is only known once it is done, so conflicts with other open PRs
+    // are checked here, before anything is pushed, while the branch can still be rebased.
+    enter("stack");
+    if (progress.done.includes("stack")) tui.skip("stack", "done in an earlier run");
+    else if (run.bug === true || !config.stack.conflicts || answering)
+      await skipStep("stack", run.bug === true ? "a bug lands on main alone" : "off");
+    else {
+      tui.start("stack", "trial-merging against open PRs");
+      const found = await conflictTarget(config, issue, worktree, progress.parent);
+      if (found !== undefined && found.parent === progress.parent) {
+        // Conflicts only with PRs it cannot also stack on; the PR body names them.
+        tui.done("stack", `stays on PR #${found.parent.pr}`);
+        await record("stack", { alsoConflicts: found.others.map(({ number }) => number) });
+      } else if (found === undefined) {
+        tui.done("stack", "no conflicts with open PRs");
+        await record("stack");
+      } else {
+        const { parent: target, others } = found;
+        tui.start("stack", `conflicts with PR #${target.pr}: rebasing onto ${target.branch}`);
+        // The branch's own commits start where it was cut: its parent, or the base (main for a HEAD base).
+        await restackOnto("stack", `origin/${target.branch}`, stackedOn() ?? (base === "HEAD" ? config.compare : base));
+        progress.parent = target;
+        const also = others.map(({ number }) => number);
+        await save();
+        enter("check");
+        const green = await runCheck();
+        tui.done("stack", `stacked on PR #${target.pr}`);
+        await record("stack", { green, ...(also.length === 0 ? {} : { alsoConflicts: also }) });
       }
-      await Bun.write(`${out}/pipeline/gate.md`, `${report(failures)}\n`);
-      progress = rewind(progress);
-      await saveAll();
+    }
+    await phase("pr", "Sonnet", async () => {
+      await step("pr", "pr", SONNET, "pr.md");
+    });
+
+    enter("gate");
+    if (progress.done.includes("gate")) {
+      tui.skip("gate", "done in an earlier run");
+      break;
+    }
+    tui.start("gate", "pr.json, evidence, commits" + (config.gates.length > 0 ? ", repo rules" : ""));
+    const failures = await gate(
+      // A stacked branch's commits are counted from its parent, as the prompts see them.
+      await artefacts(worktree, issue, stackedOn() ?? config.compare, config.args["EVIDENCE"] ?? ""),
+      config.gates,
+    );
+    if (failures.length === 0) {
+      delete progress.gated;
+      tui.done("gate");
+      await record("gate");
+      break;
+    }
+    await Bun.write(`${out}/pipeline/gate.md`, `${report(failures)}\n`);
+    progress = rewind(progress);
+    await saveAll();
+    if (attempt >= MAX_GATE_ATTEMPTS)
       throw new Error(`the gate failed; no PR opened. Rerun to fix:\n${report(failures)}`);
-    },
-  );
+    tui.fail("gate", `${failures.length} failure(s); back to fix`);
+  }
 
   enter("publish");
   if (progress.done.includes("publish")) tui.skip("publish", progress.url ?? "");
@@ -477,7 +487,7 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
       const note = stackNote(progress.parent, progress.alsoConflicts);
       if (!text.startsWith(note)) await Bun.write(body, `${note}\n\n${withoutStackNote(text)}`);
     }
-    // An audit can end with only follow-up issues and no commits, and GitHub refuses a PR with no
+    // An audit can end with nothing to change and no commits, and GitHub refuses a PR with no
     // commits, so the PR body goes on the issue as a comment instead.
     const commits = Number((await $`git rev-list --count ${stackedOn() ?? base}..${branch}`.quiet().text()).trim());
     if (commits === 0) {
@@ -571,16 +581,10 @@ async function artefacts(worktree: string, issue: string, compare: string, evide
   const pr = isPrSpec(parsed) ? parsed : null;
   const lines = async (command: ReturnType<typeof $>): Promise<string[]> =>
     (await command.cwd(worktree).quiet().text()).split("\n").filter(Boolean);
-  const review = await read("review.md");
-  const exists = new Map<number, boolean>();
-  for (const number of issuesIn(review)) {
-    if (!exists.has(number))
-      exists.set(number, (await $`gh issue view ${number} --json number`.nothrow().quiet()).exitCode === 0);
-  }
   const dir = `${worktree}/${evidenceDir}`;
   return {
     issue: { number: Number(issue) },
-    review,
+    review: await read("review.md"),
     prBody: await read("pr-body.md"),
     pr,
     commits: await lines($`git log --format=%s ${compare}..HEAD`),
@@ -588,7 +592,6 @@ async function artefacts(worktree: string, issue: string, compare: string, evide
     evidence: existsSync(dir)
       ? readdirSync(dir, { recursive: true, encoding: "utf8" }).map((path) => `${evidenceDir}/${path}`)
       : [],
-    issueExists: (number) => exists.get(number) ?? false,
   };
 }
 

@@ -6,7 +6,7 @@ import type { Progress } from "./pipeline.ts";
 /** What a run left behind, read from the worktree and `gh`. */
 export interface RunArtefacts {
   issue: { number: number };
-  /** out/pipeline/review.md */
+  /** out/pipeline/review.md, for repo rules; no built-in rule reads it. */
   review: string;
   /** out/pipeline/pr-body.md */
   prBody: string;
@@ -18,7 +18,6 @@ export interface RunArtefacts {
   evidenceDir: string;
   /** Every file under the evidence directory, from the repo root. */
   evidence: string[];
-  issueExists: (issue: number) => boolean;
 }
 
 export interface GateFailure {
@@ -27,44 +26,7 @@ export interface GateFailure {
 }
 
 const ISSUE = /#(\d+)\b/gu;
-export const issuesIn = (text: string): number[] => [...text.matchAll(ISSUE)].map((match) => Number(match[1]));
-
-/** The lines under the `## <heading>` section of a Markdown document, up to the next `## `. */
-function section(markdown: string, heading: string): string[] {
-  const lines = markdown.split("\n");
-  const start = lines.findIndex((line) => line.trim().toLowerCase() === `## ${heading.toLowerCase()}`);
-  if (start === -1) return [];
-  const rest = lines.slice(start + 1);
-  const end = rest.findIndex((line) => line.startsWith("## "));
-  return end === -1 ? rest : rest.slice(0, end);
-}
-
-// A line that opens a review finding: its id, such as `P1`, `**P1.` or `- P1`.
-const FINDING = /^\s*(?:[-*+]\s+)?\**[A-Z]\d+\b/u;
-
-// A won't-fix spec finding must name an issue that exists, unless the finding itself is wrong.
-// Only finding lines count, so the closing `Summary:` line and other prose are skipped.
-function wontFixIssue({ review, issueExists }: RunArtefacts): GateFailure[] {
-  return section(review, "Spec")
-    .filter((line) => FINDING.test(line))
-    .flatMap((line) => {
-      const verdict = /won['’]t fix:?\s*(.*)/iu.exec(line);
-      if (verdict === null) return [];
-      if (/^wrong\b/iu.test(verdict[1] ?? "")) return [];
-      const named = issuesIn(line);
-      const missing = named.filter((issue) => !issueExists(issue));
-      if (named.length === 0) return [{ rule: "wont-fix-issue", message: `names no issue: ${line.trim()}` }];
-      return missing.map((issue) => ({ rule: "wont-fix-issue", message: `#${issue} does not exist: ${line.trim()}` }));
-    });
-}
-
-// Each `## Follow-ups` entry links the issue it belongs to.
-function followUpLink({ prBody }: RunArtefacts): GateFailure[] {
-  return section(prBody, "Follow-ups")
-    .filter((line) => /^\s*(?:[-*+]|\d+\.)\s/u.test(line))
-    .filter((line) => issuesIn(line).length === 0 && !/\/issues\/\d+/u.test(line))
-    .map((line) => ({ rule: "follow-up-link", message: `links no issue: ${line.trim()}` }));
-}
+const issuesIn = (text: string): number[] => [...text.matchAll(ISSUE)].map((match) => Number(match[1]));
 
 // Every evidence path in the body is on disk and attached, and every attachment is on disk.
 function evidence({ prBody, pr, evidenceDir, evidence: files }: RunArtefacts): GateFailure[] {
@@ -93,7 +55,7 @@ function foreignCommit({ commits, issue }: RunArtefacts): GateFailure[] {
     .map((subject) => ({ rule: "foreign-commit", message: `names another issue: ${subject}` }));
 }
 
-const RULES = [prSpec, wontFixIssue, followUpLink, evidence, foreignCommit];
+const RULES = [prSpec, evidence, foreignCommit];
 
 /** A gate rule: the failures it finds in the run's outputs. A repo adds its own through `gates`. */
 export type GateRule = (artefacts: RunArtefacts) => GateFailure[] | Promise<GateFailure[]>;
@@ -115,7 +77,7 @@ export async function gate(artefacts: RunArtefacts, repoRules: GateRule[] = []):
 export const report = (failures: GateFailure[]): string =>
   failures.map(({ rule, message }) => `- ${rule}: ${message}`).join("\n");
 
-/** The steps a gate failure undoes, so the rerun starts at fix with gate.md as its task. */
+/** The steps a gate failure undoes, so fix runs again with gate.md as its task. */
 export function rewind(progress: Progress): Progress {
   const { green: _green, ...rest } = progress;
   const undone = new Set(["fix", "check", "pr", "gate"]);
