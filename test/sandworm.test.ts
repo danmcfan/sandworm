@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expand, holdReason, takeUnblocked, triage } from "../src/batch.ts";
-import { brief, Halt, parentIssues, unstack, worktreeHolding } from "../src/pipeline.ts";
+import { brief, firstSaid, Halt, parentIssues, unstack, worktreeHolding } from "../src/pipeline.ts";
 import { argsFor, promptPath, resolve } from "../src/config.ts";
 import { journal } from "../src/journal.ts";
 import {
@@ -507,6 +507,11 @@ group("brief", () => {
     expect(
       brief(new Halt("blocked: needs #263's spawn table", "implement is blocked: needs #263's spawn table\nmore")),
     ).toBe("blocked: needs #263's spawn table");
+  });
+
+  test("a blocked note's first line that says something, past headings", () => {
+    expect(firstSaid("# Blocked\n\n- Needs #263's spawn table.\nMore.")).toBe("Needs #263's spawn table.");
+    expect(firstSaid("Which sprite for the boss?")).toBe("Which sprite for the boss?");
   });
 
   test("any other error gives its first line, cut short", () => {

@@ -365,7 +365,7 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
     if (existsSync(blocked)) {
       const reason = (await Bun.file(blocked).text()).trim();
       rmSync(blocked);
-      throw new Halt(`blocked: ${reason}`, `implement is blocked: ${reason}`);
+      throw new Halt(`blocked: ${firstSaid(reason)}`, `implement is blocked: ${reason}`);
     }
   });
   await phase("review", "Opus", async () => {
@@ -771,7 +771,6 @@ export async function resolveConflicts(
   }
 }
 
-/** One line saying what a finished run left behind. */
 /** A run that stopped on purpose, not by a fault: `reason` is the few words the progress view shows. */
 export class Halt extends Error {
   readonly reason: string;
@@ -783,6 +782,12 @@ export class Halt extends Error {
 
 const BRIEF = 60;
 
+/** The first line of an agent's note that says something, without markdown markers or a bare heading like "Blocked". */
+export function firstSaid(note: string): string {
+  const lines = note.split("\n").map((line) => line.replace(/^[\s#>*_-]+/u, "").trim());
+  return lines.find((line) => line !== "" && !/^blocked:?$/iu.test(line)) ?? "";
+}
+
 /** Why a run stopped, in a few words for the progress view: a halt's reason, or the error's first line. */
 export function brief(error: unknown): string {
   const text = error instanceof Halt ? error.reason : error instanceof Error ? error.message : String(error);
@@ -790,6 +795,7 @@ export function brief(error: unknown): string {
   return line.length > BRIEF ? `${line.slice(0, BRIEF - 1)}…` : line;
 }
 
+/** One line saying what a finished run left behind. */
 export function outcome(progress: Progress): string {
   if (progress.commented === true) return "No commits, so no PR; the PR body is a comment on the issue";
   return progress.green === true ? "PR" : "Draft PR (check failing)";
