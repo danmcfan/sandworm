@@ -3,7 +3,7 @@
 The [Sandcastle](https://github.com/ai-hero/sandcastle) pipeline shared by danmcfan's repos: one issue in, one PR out.
 
 ```
-feedback → setup → implement (Opus) → review (Opus) → fix (Sonnet) → check, refixing up to 3× → stack → PR body (Sonnet) → gate → publish
+feedback → setup → implement (Opus) → review (Opus) → fix (Sonnet) → check, refixing up to 3× → stack → PR body (Sonnet) → gate, back to fix once → publish
 ```
 
 A repo runs it with `bun run sandcastle [issue] [--fresh]`, or over many issues with
@@ -91,7 +91,7 @@ Why branches are rebased before the push and merged after is in [ADR 0001](docs/
 The prompts are in [`prompts/`](prompts). A repo overrides one by putting a file of the same
 name in `.sandcastle/`. Every prompt can use `{{REPO}}`, `{{BASE}}` (what to diff against),
 `{{VERIFY}}`, `{{REVERIFY}}`, `{{EVIDENCE}}`, `{{ISSUE_NUMBER}}` and Sandcastle's `{{TARGET_BRANCH}}`;
-`fix.md` also gets `{{TASK}}` and `pr.md` gets `{{CHECK}}`. On a stacked branch `{{BASE}}` is the
+`fix.md` also gets `{{TASK}}`. On a stacked branch `{{BASE}}` is the
 parent's branch (`origin/<branch>`), so review, fixes and the PR body see only this issue's diff.
 `sync.md` gets `{{UPSTREAM}}`, the ref to merge in (origin/main, or the parent's branch).
 `stack.md` gets `{{ONTO}}` and `{{UPSTREAM}}`: it resolves a `git rebase --onto` that conflicted.
@@ -103,11 +103,14 @@ the run then fails with its reason.
 ### The gate
 
 The gate step runs after the PR body is written and before publish. It checks the run's
-outputs: pr.json is there with a title and an attach list, each won't-fix Spec finding names an issue that
-exists (or says the finding is wrong), each `## Follow-ups` entry links an issue, every evidence path
-in the PR body is on disk and in `pr.json`'s `attach`, and no commit subject names another issue.
-A failure opens no PR; the failures are in `out/pipeline/gate.md` and `error.log`, and a rerun
-restarts at fix with them as its task.
+outputs: pr.json is there with a title and an attach list, every evidence path in the PR body is on
+disk and in `pr.json`'s `attach`, and no commit subject names another issue. On a failure the run
+goes back to fix once, with the failures in `out/pipeline/gate.md` as its task, then writes the PR
+body and runs the gate again. A second failure opens no PR; the failures are in `gate.md` and
+`error.log`, and a rerun restarts at fix with them as its task.
+
+Agents never create, comment on or edit issues. A won't-fix finding goes in the PR body's
+`## Out of scope` section, and a skipped fix in `## Skipped`; the owner decides which become issues.
 
 A repo adds rules of its own with `gates`, run after the built-in ones on the same outputs. A rule
 takes the `RunArtefacts` (review, PR body, pr.json, commit subjects, evidence files, …) and returns

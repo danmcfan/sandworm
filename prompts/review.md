@@ -14,8 +14,8 @@ Commits under review:
 4. Decide what happens to each finding. A cheaper agent applies the fixes and follows your verdicts, so commit to one per finding; do not hedge with "judgement call":
    - **must fix**: a bug, a spec gap, or a finding that undercuts what the issue is for.
    - **should fix**: worth the change in this PR.
-   - **won't fix: <reason>**: wrong, not worth the change, or belongs to another issue (name it).
-     On a Spec finding, won't fix is allowed only when the finding is wrong (`won't fix: wrong, <why>`) or belongs to an issue you name as `#N`; check that it exists with `gh issue view N`, or file it with `gh issue create`. The run will not publish otherwise.
+   - **won't fix: <reason>**: wrong, not worth the change, or out of scope for this issue. If an open issue already covers it, name it as `#N`.
+     Do not create, comment on or edit GitHub issues; the owner decides which issues exist.
 5. Write the report to `out/pipeline/review.md`, with the `## Standards` and `## Spec` headings from the skill. Number every finding (S1, S2, … and P1, P2, …), and give each its verdict, file, line and a one-line fix. Start anything that needs the owner to decide with `Owner decision:`. If there are no findings, write `No findings.` as the whole file.
 
 # Done

@@ -350,12 +350,11 @@ group("gate", () => {
   const passing: RunArtefacts = {
     issue: { number: 7 },
     review: "## Standards\n\nS1 (should fix): rename it.\n\n## Spec\n\nP1 (won't fix: belongs to #9): add a flag.\n",
-    prBody: "Closes #7\n\n![menu](./out/verify/menu.png)\n\n## Follow-ups\n\n- P1: a flag, in #9\n",
+    prBody: "Closes #7\n\n![menu](./out/verify/menu.png)\n\n## Out of scope\n\n- P1: a flag, in #9\n",
     pr: { title: "Menu: add it", attach: ["out/verify/menu.png"] },
     commits: ["Menu: add it (#7)", "Menu: rename it"],
     evidenceDir: "out/verify",
     evidence: ["out/verify/menu.png"],
-    issueExists: (issue) => issue === 7 || issue === 9,
   };
   const rules = async (artefacts: Partial<RunArtefacts>): Promise<string[]> =>
     (await gate({ ...passing, ...artefacts })).map(({ rule }) => rule);
@@ -393,50 +392,6 @@ group("gate", () => {
     expect(failures.map(({ rule }) => rule)).toEqual(["repo-rule", "repo-rule"]);
     expect(failures[0]?.message).toContain("rule 0 threw");
     expect(failures[1]?.message).toContain("nope");
-  });
-
-  test("fails a won't-fix spec finding that names no issue", async () => {
-    expect(await rules({ review: "## Spec\n\nP1 (won't fix: not worth it): add a flag.\n" })).toEqual([
-      "wont-fix-issue",
-    ]);
-  });
-
-  test("passes a won't-fix spec finding that is wrong", async () => {
-    expect(await rules({ review: "## Spec\n\nP1 (won't fix: wrong, the flag exists): add a flag.\n" })).toEqual([]);
-  });
-
-  test("fails a won't-fix spec finding naming an issue that does not exist", async () => {
-    expect(await rules({ review: "## Spec\n\nP1 (won't fix: belongs to #404): add a flag.\n" })).toEqual([
-      "wont-fix-issue",
-    ]);
-  });
-
-  test("skips the review's summary line in the spec section", async () => {
-    const review =
-      "## Spec\n\nP1. Add a flag. won't fix: wrong, the flag exists.\n\nSummary: Standards 5 findings (4 should fix, 1 won't fix); Spec 1 finding (won't fix: wrong).\n";
-    expect(await rules({ review })).toEqual([]);
-  });
-
-  test("checks bold and listed spec findings", async () => {
-    expect(await rules({ review: "## Spec\n\n**P1. Add a flag.** won't fix: belongs elsewhere\n" })).toEqual([
-      "wont-fix-issue",
-    ]);
-    const failures = await gate({ ...passing, review: "## Spec\n\n- P1. Add a flag. won't fix: belongs to #404\n" });
-    expect(failures.map(({ rule }) => rule)).toEqual(["wont-fix-issue"]);
-    expect(failures[0]?.message).toContain("does not exist");
-  });
-
-  test("leaves won't-fix standards findings alone", async () => {
-    expect(
-      await rules({ review: "## Standards\n\nS1 (won't fix: not worth it): rename.\n\n## Spec\n\nNone.\n" }),
-    ).toEqual([]);
-  });
-
-  test("fails a follow-up without an issue link", async () => {
-    expect(await rules({ prBody: "Closes #7\n\n## Follow-ups\n\n- P1: a flag, later\n" })).toEqual(["follow-up-link"]);
-    expect(await rules({ prBody: "Closes #7\n\n## Follow-ups\n\n- P1: https://github.com/a/b/issues/9\n" })).toEqual(
-      [],
-    );
   });
 
   test("fails a body path missing from disk", async () => {

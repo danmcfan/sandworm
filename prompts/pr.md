@@ -1,12 +1,10 @@
 # Context
 
-The work on branch `{{TARGET_BRANCH}}` for issue #{{ISSUE_NUMBER}} is done. Your job is to write its pull request. The host opens the PR; you only write files. You change no code and make no commits.
+The work on branch `{{TARGET_BRANCH}}` for issue #{{ISSUE_NUMBER}} is done. Your job is to write its pull request. The host opens the PR; you only write files. You change no code and make no commits. Do not create, comment on or edit GitHub issues.
 
 Commits:
 
 !`git log --oneline {{BASE}}..HEAD`
-
-Final `bun run check`: **{{CHECK}}**.
 
 # Task
 
@@ -15,9 +13,9 @@ Final `bun run check`: **{{CHECK}}**.
    If `out/pipeline/feedback.md` exists, the PR is already open and this round answered the owner's comments in it. Read the current title and body (`gh pr view {{TARGET_BRANCH}} --json title,body`) and rewrite them so they describe the branch as it now stands, not as it was. Keep earlier rounds' review results, and add a `## Feedback` section: each comment and what changed for it. The host replaces the title and body with yours.
 3. Use the `/pr` skill to write the body to `out/pipeline/pr-body.md`. Add:
    - `Closes #{{ISSUE_NUMBER}}` near the top.
-   - A `## Review` section: each review finding and what happened to it, from `fixes.md`.
-   - A `## Follow-ups` section, if any finding is **won't fix** or was skipped: each one with its reason and a link (`#N`) to the issue it belongs to. If it has none yet, file one with `gh issue create` and link that. An entry with no link stops the run.
-   - If the check failed, a `## Check failing` section saying what is still red.
+   - A `## Review` section: each finding that was fixed, from `fixes.md`.
+   - A `## Out of scope` section, if any finding is **won't fix**: each one with its reason, and the `#N` the review named, if any.
+   - A `## Skipped` section, if the fix step skipped any finding: each one with what it found.
    - Last line: `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
      Reference each picked file by its path from the repo root: `![what it shows](./{{EVIDENCE}}/<path>)`.
      Confirm every claim about the code with a search (`git grep`, `git diff`) before writing it.
