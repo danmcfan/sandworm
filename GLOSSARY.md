@@ -8,7 +8,8 @@ or named on a line of the issue's body that opens with "Blocked by #N". Owners w
 
 **Parent**: the open PR a branch is built on instead of main, recorded as
 `{ issue, branch, pr, sha }` in state.json. `sha` is the parent's tip when the branch was cut
-from it or last took in its commits. A branch has at most one parent.
+from it or last took in its commits. A branch has at most one parent. Once a parent merges, its
+issue is kept in state.json's `pastParents`, so the gate still lets the branch's commits name it.
 
 **Stack** (verb): build a branch on a parent. The branch is cut from (or rebased onto) the
 parent's branch, its prompts diff against it (`{{BASE}}`), and its PR targets it. A branch is

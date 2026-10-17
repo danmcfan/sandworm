@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expand, holdReason, takeUnblocked, triage } from "../src/batch.ts";
-import { worktreeHolding } from "../src/pipeline.ts";
+import { parentIssues, unstack, worktreeHolding } from "../src/pipeline.ts";
 import { argsFor, promptPath, resolve } from "../src/config.ts";
 import { journal } from "../src/journal.ts";
 import {
@@ -418,9 +418,24 @@ group("gate", () => {
   });
 
   test("a stacked run's commits may name its parent's issue, and only that one", async () => {
-    const stacked = { issue: { number: 7, parent: 6 } };
+    const stacked = { issue: { number: 7, parents: [6] } };
     expect(await rules({ ...stacked, commits: ["Menu: build on #6's entry waves"] })).toEqual([]);
     expect(await rules({ ...stacked, commits: ["Menu: fix #8 too"] })).toEqual(["foreign-commit"]);
+  });
+
+  test("restacking onto main keeps the merged parent's issue for the gate", () => {
+    const parent = { issue: "234", branch: "agent/234", pr: "300", sha: "abc" };
+    const restacked = unstack({ done: ["implement"], parent, pastParents: ["220"] });
+    expect(restacked).toEqual({ done: ["implement"], pastParents: ["220", "234"] });
+    expect(parentIssues(restacked)).toEqual([220, 234]);
+    expect(parentIssues({ done: [], parent: { ...parent, issue: "" } })).toEqual([]);
+    expect(unstack({ done: [], parent: { ...parent, issue: "" } })).toEqual({ done: [] });
+  });
+
+  test("a branch restacked onto main after its parent merged may still name that parent's issue", async () => {
+    // #234 was the parent and merged; the branch now sits on main, stacked on #240.
+    const restacked = { issue: { number: 230, parents: [240, 234] } };
+    expect(await rules({ ...restacked, commits: ["Waves: rebase onto #234"] })).toEqual([]);
   });
 
   test("fails a missing or malformed pr.json", async () => {

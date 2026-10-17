@@ -77,6 +77,8 @@ export interface Progress {
   feedbackSeen?: string;
   /** The open PR this branch is stacked on, if any; kept across --fresh and feedback rounds. */
   parent?: Parent;
+  /** Issues of earlier parents that merged, newest last; their commits may still name them. Kept like `parent`. */
+  pastParents?: string[];
   /** Open PRs the branch also conflicts with but could not stack on too, by number. */
   alsoConflicts?: string[];
   /** The gate failed, so fix works from out/pipeline/gate.md. */
@@ -155,8 +157,7 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
   const stored: unknown = existsSync(stateFile) ? await Bun.file(stateFile).json() : undefined;
   let progress: Progress = isProgress(stored) ? stored : { done: [] };
   // --fresh starts the steps over on the same branch, which is still stacked where it was.
-  if (run.fresh === true)
-    progress = progress.parent === undefined ? { done: [] } : { done: [], parent: progress.parent };
+  if (run.fresh === true) progress = { done: [], ...stacking(progress) };
   if (run.bug === true) delete progress.parent;
   delete progress.failed;
   const save = async (): Promise<void> => {
@@ -187,7 +188,7 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
       rounds,
       ...(progress.url === undefined ? {} : { url: progress.url }),
       ...(feedback.seen === undefined ? {} : { feedbackSeen: feedback.seen }),
-      ...(progress.parent === undefined ? {} : { parent: progress.parent }),
+      ...stacking(progress),
     };
     // The last round's review and fixes would read as this round's.
     for (const file of ["review.md", "fixes.md", "check.log"]) rmSync(`${savedOut}/pipeline/${file}`, { force: true });
@@ -204,6 +205,7 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
   const exists = (await $`git rev-parse --verify --quiet refs/heads/${branch}`.nothrow().quiet()).exitCode === 0;
   if (!exists) {
     delete progress.parent;
+    delete progress.pastParents;
     if (run.bug !== true && config.stack.blockers) {
       tui.start("setup", "reading blocked-by links");
       const parent = await findParent(config, issue);
@@ -323,7 +325,7 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
       if (published) await recheck(sandbox, signal);
       // An unpublished branch's check ran before the rebase, so it runs again.
       else progress.done = progress.done.filter((name) => name !== "check");
-      delete progress.parent;
+      progress = unstack(progress);
       await save();
       if (published) {
         await $`git push -q --force-with-lease origin ${branch}`.cwd(worktree).quiet();
@@ -453,7 +455,7 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
         issue,
         stackedOn() ?? config.compare,
         config.args["EVIDENCE"] ?? "",
-        progress.parent?.issue,
+        parentIssues(progress),
       ),
       config.gates,
     );
@@ -577,7 +579,7 @@ async function artefacts(
   issue: string,
   compare: string,
   evidenceDir: string,
-  parent?: string,
+  parents: number[],
 ): Promise<RunArtefacts> {
   const pipeline = `${worktree}/out/pipeline`;
   const read = async (file: string): Promise<string> =>
@@ -595,7 +597,7 @@ async function artefacts(
     (await command.cwd(worktree).quiet().text()).split("\n").filter(Boolean);
   const dir = `${worktree}/${evidenceDir}`;
   return {
-    issue: { number: Number(issue), ...(parent === undefined || parent === "" ? {} : { parent: Number(parent) }) },
+    issue: { number: Number(issue), parents },
     review: await read("review.md"),
     prBody: await read("pr-body.md"),
     pr,
@@ -790,10 +792,29 @@ export function usageReport(runs: IssueRun["runs"]): string[] {
   );
 }
 
+/** The stacking a run keeps when its steps start over (--fresh, a feedback round). */
+function stacking({ parent, pastParents }: Progress): Pick<Progress, "parent" | "pastParents"> {
+  return { ...(parent === undefined ? {} : { parent }), ...(pastParents === undefined ? {} : { pastParents }) };
+}
+
+/** Progress once the parent has merged and the branch moved onto main: the parent's issue is kept in `pastParents`. */
+export function unstack(progress: Progress): Progress {
+  const { parent, ...rest } = progress;
+  if (parent === undefined || parent.issue === "") return rest;
+  return { ...rest, pastParents: [...(progress.pastParents ?? []), parent.issue] };
+}
+
+/** The issues of every PR the branch is or was stacked on, for the gate. */
+export function parentIssues({ parent, pastParents = [] }: Progress): number[] {
+  return [...(parent === undefined ? [] : [parent.issue]), ...pastParents].filter((n) => n !== "").map(Number);
+}
+
 function isProgress(value: unknown): value is Progress {
   if (typeof value !== "object" || value === null || !("done" in value)) return false;
   const { done } = value;
   if ("parent" in value && !isParent(value.parent)) return false;
+  const past: unknown = "pastParents" in value ? value.pastParents : [];
+  if (!Array.isArray(past) || !past.every((n: unknown) => typeof n === "string")) return false;
   return Array.isArray(done) && done.every((name: unknown) => typeof name === "string");
 }
 

@@ -5,8 +5,8 @@ import type { Progress } from "./pipeline.ts";
 
 /** What a run left behind, read from the worktree and `gh`. */
 export interface RunArtefacts {
-  /** `parent` is the issue a stacked branch's parent PR closes; its commits may name it. */
-  issue: { number: number; parent?: number };
+  /** `parents`: the issues closed by the PRs the branch is or was stacked on; its commits may name them. */
+  issue: { number: number; parents?: number[] };
   /** out/pipeline/review.md, for repo rules; no built-in rule reads it. */
   review: string;
   /** out/pipeline/pr-body.md */
@@ -49,10 +49,9 @@ function prSpec({ pr }: RunArtefacts): GateFailure[] {
     : [];
 }
 
-// The branch holds only this issue's commits. A stacked branch's may name the parent's issue too.
+// The branch holds only this issue's commits. A stacked branch's may name its parents' issues too.
 function foreignCommit({ commits, issue }: RunArtefacts): GateFailure[] {
-  const own = new Set([issue.number]);
-  if (issue.parent !== undefined) own.add(issue.parent);
+  const own = new Set([issue.number, ...(issue.parents ?? [])]);
   return commits
     .filter((subject) => issuesIn(subject).some((named) => !own.has(named)))
     .map((subject) => ({ rule: "foreign-commit", message: `names another issue: ${subject}` }));
