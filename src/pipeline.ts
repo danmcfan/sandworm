@@ -448,7 +448,13 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
     tui.start("gate", "pr.json, evidence, commits" + (config.gates.length > 0 ? ", repo rules" : ""));
     const failures = await gate(
       // A stacked branch's commits are counted from its parent, as the prompts see them.
-      await artefacts(worktree, issue, stackedOn() ?? config.compare, config.args["EVIDENCE"] ?? ""),
+      await artefacts(
+        worktree,
+        issue,
+        stackedOn() ?? config.compare,
+        config.args["EVIDENCE"] ?? "",
+        progress.parent?.issue,
+      ),
       config.gates,
     );
     if (failures.length === 0) {
@@ -566,7 +572,13 @@ function prState(view: unknown): { state: string; head: string } {
 }
 
 // The run's outputs and the facts about them the gate needs, from the worktree and `gh`.
-async function artefacts(worktree: string, issue: string, compare: string, evidenceDir: string): Promise<RunArtefacts> {
+async function artefacts(
+  worktree: string,
+  issue: string,
+  compare: string,
+  evidenceDir: string,
+  parent = "",
+): Promise<RunArtefacts> {
   const pipeline = `${worktree}/out/pipeline`;
   const read = async (file: string): Promise<string> =>
     existsSync(`${pipeline}/${file}`) ? Bun.file(`${pipeline}/${file}`).text() : "";
@@ -583,7 +595,7 @@ async function artefacts(worktree: string, issue: string, compare: string, evide
     (await command.cwd(worktree).quiet().text()).split("\n").filter(Boolean);
   const dir = `${worktree}/${evidenceDir}`;
   return {
-    issue: { number: Number(issue) },
+    issue: { number: Number(issue), ...(parent === "" ? {} : { parent: Number(parent) }) },
     review: await read("review.md"),
     prBody: await read("pr-body.md"),
     pr,

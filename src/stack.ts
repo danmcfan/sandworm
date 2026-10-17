@@ -240,8 +240,35 @@ export async function openPrs(config: Resolved): Promise<OpenPr[]> {
   });
 }
 
-/** The issues GitHub says block `issue` (its native "blocked by" links), with whether each is open. */
+const BLOCKED_BY = /blocked by\b[^\n]*/giu;
+
+/** The issues named on "Blocked by #N" lines of an issue body, in order. */
+export function bodyBlockers(body: string): string[] {
+  const named = [...body.matchAll(BLOCKED_BY)].flatMap(([line]) =>
+    [...line.matchAll(/#(\d+)\b/gu)].map((m) => m[1] ?? ""),
+  );
+  return [...new Set(named)];
+}
+
+/**
+ * The issues that block `issue`, with whether each is open: GitHub's native "blocked by" links, and
+ * any issue named on a "Blocked by #N" line of its body, since owners write those too.
+ */
 export async function blockersOf(issue: string): Promise<{ issue: string; open: boolean }[]> {
+  const linked = await linkedBlockers(issue);
+  const body = (await $`gh issue view ${issue} --json body --jq .body`.quiet().text()).trim();
+  const written = bodyBlockers(body).filter((n) => n !== issue && !linked.some((b) => b.issue === n));
+  const states = await Promise.all(
+    written.map(async (n) => {
+      const view = await $`gh issue view ${n} --json state --jq .state`.nothrow().quiet();
+      // A line naming a PR or a missing issue blocks nothing that can be waited on.
+      return view.exitCode === 0 ? [{ issue: n, open: view.text().trim() === "OPEN" }] : [];
+    }),
+  );
+  return [...linked, ...states.flat()];
+}
+
+async function linkedBlockers(issue: string): Promise<{ issue: string; open: boolean }[]> {
   const text =
     await $`gh api --paginate repos/{owner}/{repo}/issues/${issue}/dependencies/blocked_by --jq '.[] | {number, state}'`
       .quiet()

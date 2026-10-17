@@ -7,6 +7,7 @@ import { worktreeHolding } from "../src/pipeline.ts";
 import { argsFor, promptPath, resolve } from "../src/config.ts";
 import { journal } from "../src/journal.ts";
 import {
+  bodyBlockers,
   chainTip,
   conflictingFiles,
   exempt,
@@ -148,6 +149,12 @@ group("stack: batch order", () => {
 
   test("blockers outside the batch are ignored", () => {
     expect(order(["1"], new Map([["1", ["99"]]]))).toEqual({ order: ["1"], cycles: [] });
+  });
+
+  test("reads Blocked by lines from an issue body", () => {
+    const body = "Do the thing.\n\nBlocked by #263\n- blocked by #266, #270\n**Blocked by:** #12\nSee #99.";
+    expect(bodyBlockers(body)).toEqual(["263", "266", "270", "12"]);
+    expect(bodyBlockers("Unblocks #5. Nothing blocks this.")).toEqual([]);
   });
 
   test("a cycle, and whatever waits on it, is reported and left out", () => {
@@ -407,6 +414,12 @@ group("gate", () => {
 
   test("fails a commit naming another issue", async () => {
     expect(await rules({ commits: ["Menu: add it (#7)", "Lobby: fix the timer (#8)"] })).toEqual(["foreign-commit"]);
+  });
+
+  test("a stacked run's commits may name its parent's issue, and only that one", async () => {
+    const stacked = { issue: { number: 7, parent: 6 } };
+    expect(await rules({ ...stacked, commits: ["Menu: build on #6's entry waves"] })).toEqual([]);
+    expect(await rules({ ...stacked, commits: ["Menu: fix #8 too"] })).toEqual(["foreign-commit"]);
   });
 
   test("fails a missing or malformed pr.json", async () => {

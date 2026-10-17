@@ -13,6 +13,7 @@ Commits:
    If `out/pipeline/feedback.md` exists, the PR is already open and this round answered the owner's comments in it. Read the current title and body (`gh pr view {{TARGET_BRANCH}} --json title,body`) and rewrite them so they describe the branch as it now stands, not as it was. Keep earlier rounds' review results, and add a `## Feedback` section: each comment and what changed for it. The host replaces the title and body with yours.
 3. Use the `/pr` skill to write the body to `out/pipeline/pr-body.md`. Add:
    - `Closes #{{ISSUE_NUMBER}}` near the top.
+   - A `## Calls made` section, if the commits record calls the agent made that the issue left open (design, art, placement): each one and what was chosen.
    - A `## Review` section: each finding that was fixed, from `fixes.md`.
    - A `## Out of scope` section, if any finding is **won't fix**: each one with its reason, and the `#N` the review named, if any.
    - A `## Skipped` section, if the fix step skipped any finding: each one with what it found.
