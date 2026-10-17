@@ -240,7 +240,8 @@ export async function openPrs(config: Resolved): Promise<OpenPr[]> {
   });
 }
 
-const BLOCKED_BY = /blocked by\b[^\n]*/giu;
+// A line that opens with "Blocked by" (after any list or bold markers); its #N up to a sentence break.
+const BLOCKED_BY = /^[\s>*_-]*blocked by\b[^\n.;]*/gimu;
 
 /** The issues named on "Blocked by #N" lines of an issue body, in order. */
 export function bodyBlockers(body: string): string[] {
@@ -254,7 +255,7 @@ export function bodyBlockers(body: string): string[] {
  * The issues that block `issue`, with whether each is open: GitHub's native "blocked by" links, and
  * any issue named on a "Blocked by #N" line of its body, since owners write those too.
  */
-export async function blockersOf(issue: string): Promise<{ issue: string; open: boolean }[]> {
+export async function blockersOf(issue: string): Promise<Blocker[]> {
   const linked = await linkedBlockers(issue);
   const body = (await $`gh issue view ${issue} --json body --jq .body`.quiet().text()).trim();
   const written = bodyBlockers(body).filter((n) => n !== issue && !linked.some((b) => b.issue === n));
@@ -268,7 +269,7 @@ export async function blockersOf(issue: string): Promise<{ issue: string; open: 
   return [...linked, ...states.flat()];
 }
 
-async function linkedBlockers(issue: string): Promise<{ issue: string; open: boolean }[]> {
+async function linkedBlockers(issue: string): Promise<Blocker[]> {
   const text =
     await $`gh api --paginate repos/{owner}/{repo}/issues/${issue}/dependencies/blocked_by --jq '.[] | {number, state}'`
       .quiet()

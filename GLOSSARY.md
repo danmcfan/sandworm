@@ -3,8 +3,8 @@
 **Issue run**: one issue through the pipeline, from feedback to publish, on one branch
 (`config.branch(issue)`) in one container. Its progress is `.sandcastle/logs/<issue>/state.json`.
 
-**Blocker**: an issue that GitHub's native issue dependencies say blocks another ("blocked by").
-Only these links count; text in an issue's body never does.
+**Blocker**: an issue that blocks another: through GitHub's native issue dependencies ("blocked by"),
+or named on a line of the issue's body that opens with "Blocked by #N". Owners write both.
 
 **Parent**: the open PR a branch is built on instead of main, recorded as
 `{ issue, branch, pr, sha }` in state.json. `sha` is the parent's tip when the branch was cut

@@ -577,7 +577,7 @@ async function artefacts(
   issue: string,
   compare: string,
   evidenceDir: string,
-  parent = "",
+  parent?: string,
 ): Promise<RunArtefacts> {
   const pipeline = `${worktree}/out/pipeline`;
   const read = async (file: string): Promise<string> =>
@@ -595,7 +595,7 @@ async function artefacts(
     (await command.cwd(worktree).quiet().text()).split("\n").filter(Boolean);
   const dir = `${worktree}/${evidenceDir}`;
   return {
-    issue: { number: Number(issue), ...(parent === "" ? {} : { parent: Number(parent) }) },
+    issue: { number: Number(issue), ...(parent === undefined || parent === "" ? {} : { parent: Number(parent) }) },
     review: await read("review.md"),
     prBody: await read("pr-body.md"),
     pr,

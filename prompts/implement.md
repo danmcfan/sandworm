@@ -20,7 +20,7 @@ Build only on this branch. Never `git reset`, rebase, or merge another branch in
 The issue's labels (the `labels:` line above) say who makes the calls it leaves open, such as design, art or placement:
 
 - `ready-for-agent`: you do. Make each call yourself, in line with the repo's docs, and name it in your commit message so the PR can list it. Do not stop to ask.
-- `ready-for-human` or `needs-owner`: the owner does. If the issue leaves such a question open, make no changes: post the question as a comment on the issue with `gh issue comment {{ISSUE_NUMBER}}`, write it to `out/pipeline/blocked.md`, and stop.
+- Any other label (`ready-for-human`, `needs-owner`) or none: the owner does. If the issue leaves such a question open, make no changes: post the question as a comment on the issue with `gh issue comment {{ISSUE_NUMBER}}`, write it to `out/pipeline/blocked.md`, and stop.
 
 Another agent reviews your work after you, so do not review it yourself. Do not push, open a PR or merge.
 

@@ -51,7 +51,8 @@ function prSpec({ pr }: RunArtefacts): GateFailure[] {
 
 // The branch holds only this issue's commits. A stacked branch's may name the parent's issue too.
 function foreignCommit({ commits, issue }: RunArtefacts): GateFailure[] {
-  const own = new Set([issue.number, ...(issue.parent === undefined ? [] : [issue.parent])]);
+  const own = new Set([issue.number]);
+  if (issue.parent !== undefined) own.add(issue.parent);
   return commits
     .filter((subject) => issuesIn(subject).some((named) => !own.has(named)))
     .map((subject) => ({ rule: "foreign-commit", message: `names another issue: ${subject}` }));

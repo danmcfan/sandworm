@@ -155,6 +155,7 @@ group("stack: batch order", () => {
     const body = "Do the thing.\n\nBlocked by #263\n- blocked by #266, #270\n**Blocked by:** #12\nSee #99.";
     expect(bodyBlockers(body)).toEqual(["263", "266", "270", "12"]);
     expect(bodyBlockers("Unblocks #5. Nothing blocks this.")).toEqual([]);
+    expect(bodyBlockers("Not blocked by #5.\nBlocked by #6; see #99 for context")).toEqual(["6"]);
   });
 
   test("a cycle, and whatever waits on it, is reported and left out", () => {
