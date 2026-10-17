@@ -1,7 +1,7 @@
 import { $ } from "bun";
 import { resolve, type Config } from "./config.ts";
 import { describe, guard } from "./journal.ts";
-import { containers, logsFor, outcome, runIssue, STEPS, usageReport, type IssueRun } from "./pipeline.ts";
+import { brief, containers, logsFor, outcome, runIssue, STEPS, usageReport, type IssueRun } from "./pipeline.ts";
 import { exempt, Skip } from "./stack.ts";
 import { createTui } from "./tui.ts";
 
@@ -80,7 +80,7 @@ export async function runSingle(config: Config, args = process.argv.slice(2)): P
       return;
     }
     if (!stop.signal.aborted) {
-      tui.fail(current, "failed");
+      tui.fail(current, brief(error));
       tui.close([
         `Failed during ${current}: ${describe(error)}`,
         `Logs: ${logs}/ (the stack is in error.log)`,

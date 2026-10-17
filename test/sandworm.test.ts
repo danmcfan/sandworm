@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expand, holdReason, takeUnblocked, triage } from "../src/batch.ts";
-import { parentIssues, unstack, worktreeHolding } from "../src/pipeline.ts";
+import { brief, Halt, parentIssues, unstack, worktreeHolding } from "../src/pipeline.ts";
 import { argsFor, promptPath, resolve } from "../src/config.ts";
 import { journal } from "../src/journal.ts";
 import {
@@ -499,5 +499,19 @@ group("mergeBugs hold", () => {
   test("a clean review, or a won't-fix only on standards, merges", () => {
     expect(holdReason("No findings.")).toBeNull();
     expect(holdReason("## Standards\n\nS1 won't fix: style.\n\n## Spec\n\nP1 must fix: x.\n")).toBeNull();
+  });
+});
+
+group("brief", () => {
+  test("a halt gives its own short reason", () => {
+    expect(
+      brief(new Halt("blocked: needs #263's spawn table", "implement is blocked: needs #263's spawn table\nmore")),
+    ).toBe("blocked: needs #263's spawn table");
+  });
+
+  test("any other error gives its first line, cut short", () => {
+    expect(brief(new Error("the agent did not merge origin/main\nstack"))).toBe("the agent did not merge origin/main");
+    expect(brief(new Error("x".repeat(100)))).toBe(`${"x".repeat(59)}…`);
+    expect(brief("boom")).toBe("boom");
   });
 });

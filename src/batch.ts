@@ -2,6 +2,7 @@ import { $ } from "bun";
 import { resolve, type Config, type Resolved } from "./config.ts";
 import { describe, guard } from "./journal.ts";
 import {
+  brief,
   containers,
   logsFor,
   outcome,
@@ -296,7 +297,7 @@ class Batch {
         tui.set(issue, "stopped", current, "stopped (Ctrl-C)");
         this.results.set(issue, `Stopped during ${current}`);
       } else {
-        tui.set(issue, "failed", current, "failed");
+        tui.set(issue, "failed", current, brief(error));
         this.results.set(issue, `Failed during ${current}: ${describe(error)}`);
       }
     } finally {
