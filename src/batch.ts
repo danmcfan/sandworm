@@ -11,7 +11,7 @@ import {
   type IssueRun,
   type Reporter,
 } from "./pipeline.ts";
-import { blockersOf, BUG, nextIssue, order, Skip, type Status } from "./stack.ts";
+import { blockersOf, BUG, nextIssue, order, Skip, type IssueStates, type Status } from "./stack.ts";
 import { createBatchTui } from "./tui.ts";
 
 const READY = "ready-for-agent";
@@ -61,12 +61,12 @@ export async function runBatch(config: Config, args = process.argv.slice(2)): Pr
     named.length > 0
       ? await Promise.all(
           named.map(async (n): Promise<unknown> => {
-            const view = await $`gh issue view ${n} --json number,state,labels`.nothrow().quiet();
+            const view = await $`gh issue view ${n} --json number,state,labels,body`.nothrow().quiet();
             return view.exitCode === 0 ? view.json() : { number: n, state: "MISSING", labels: [] };
           }),
         )
       : [
-          await $`gh issue list --label ${READY} --state open --search sort:created-asc --limit 200 --json number,state,labels`
+          await $`gh issue list --label ${READY} --state open --search sort:created-asc --limit 200 --json number,state,labels,body`
             .quiet()
             .json(),
         ].flat();
@@ -83,7 +83,14 @@ export async function runBatch(config: Config, args = process.argv.slice(2)): Pr
   // Bugs under mergeBugs never stack, so only the other issues' blockers are read.
   const blockedBy = new Map<string, string[]>();
   if (resolved.stack.blockers) {
-    const read = await Promise.all(others.map(async (issue) => [issue, await blockersOf(issue)] as const));
+    // Every listed issue's state and body are known already, and a blocker several issues name is looked up once.
+    const states: IssueStates = new Map(
+      listed.map(({ number, state }) => [String(number), Promise.resolve(state === "OPEN")]),
+    );
+    const bodies = new Map(listed.map(({ number, body }) => [String(number), body]));
+    const read = await Promise.all(
+      others.map(async (issue) => [issue, await blockersOf(issue, { body: bodies.get(issue), states })] as const),
+    );
     for (const [issue, blockers] of read)
       blockedBy.set(
         issue,
@@ -390,6 +397,7 @@ interface Issue {
   number: number;
   state: string;
   labels: { name: string }[];
+  body?: string;
 }
 
 // mergeable is MERGEABLE, CONFLICTING or UNKNOWN; each check run or commit status is pending, passed or failed.

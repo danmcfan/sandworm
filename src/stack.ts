@@ -251,22 +251,38 @@ export function bodyBlockers(body: string): string[] {
   return [...new Set(named)];
 }
 
+/** Whether an issue is open, or undefined when it is a PR or missing; shared so each issue is looked up once. */
+export type IssueStates = Map<string, Promise<boolean | undefined>>;
+
+/** What a caller already knows, to save `gh` calls: the issue's body, and states looked up before. */
+export interface Known {
+  body?: string | undefined;
+  states?: IssueStates;
+}
+
 /**
  * The issues that block `issue`, with whether each is open: GitHub's native "blocked by" links, and
  * any issue named on a "Blocked by #N" line of its body, since owners write those too.
  */
-export async function blockersOf(issue: string): Promise<Blocker[]> {
+export async function blockersOf(issue: string, known: Known = {}): Promise<Blocker[]> {
+  const { states = new Map() } = known;
   const linked = await linkedBlockers(issue);
-  const body = (await $`gh issue view ${issue} --json body --jq .body`.quiet().text()).trim();
+  const body = known.body ?? (await $`gh issue view ${issue} --json body --jq .body`.quiet().text());
   const written = bodyBlockers(body).filter((n) => n !== issue && !linked.some((b) => b.issue === n));
-  const states = await Promise.all(
+  const found = await Promise.all(
     written.map(async (n) => {
-      const view = await $`gh issue view ${n} --json state --jq .state`.nothrow().quiet();
+      if (!states.has(n)) states.set(n, isOpen(n));
+      const open = await states.get(n);
       // A line naming a PR or a missing issue blocks nothing that can be waited on.
-      return view.exitCode === 0 ? [{ issue: n, open: view.text().trim() === "OPEN" }] : [];
+      return open === undefined ? [] : [{ issue: n, open }];
     }),
   );
-  return [...linked, ...states.flat()];
+  return [...linked, ...found.flat()];
+}
+
+async function isOpen(issue: string): Promise<boolean | undefined> {
+  const view = await $`gh issue view ${issue} --json state --jq .state`.nothrow().quiet();
+  return view.exitCode === 0 ? view.text().trim() === "OPEN" : undefined;
 }
 
 async function linkedBlockers(issue: string): Promise<Blocker[]> {
