@@ -22,8 +22,8 @@ import type { Tui } from "./tui.ts";
 // The pipeline for one issue, shared by the single-issue and batch runners.
 //
 // One container, one branch (config.branch, cut from config.base):
-//   implement (Opus) → review and triage (Opus) → fix (Sonnet) → check, refixing up to 3 times
-//   → stack → PR body (Sonnet) → gate (src/gate.ts), back to fix once if it fails
+//   implement (Opus) → review, which fixes its findings (Opus) → check, refixing up to 3 times
+//   → stack → PR body (Sonnet) → gate (src/gate.ts), back to fix (Sonnet) once if it fails
 // then it pushes the branch and opens the PR. It is a draft if the check is still red.
 //
 // A branch is stacked (see GLOSSARY.md and src/stack.ts) when its issue is blocked by another
@@ -372,7 +372,7 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
     await step("review", "review", OPUS, "review.md");
   });
 
-  // The fix agent is told to leave the check green; this makes sure, and refixes if not.
+  // The review leaves fixes it never checked; this runs the check, and refixes until it is green.
   const checkGreen = async (round: number): Promise<boolean> => {
     tui.start("check", round === 1 ? "bun run check" : `bun run check, after fix round ${round - 1}`);
     const check = await untilAborted(sandbox.exec("bun run check"), signal);
@@ -395,14 +395,16 @@ async function pipeline(run: IssueRun, writing: (log: string) => void): Promise<
   };
   // A gate failure sends the run back to fix, with gate.md as its task, once more in this run.
   for (let attempt = 1; ; attempt++) {
-    await phase("fix", "Sonnet", async () => {
-      await step("fix", "fix", SONNET, "fix.md", {
-        TASK:
-          progress.gated === true
-            ? "The PR was not published: the run broke the gate rules in `out/pipeline/gate.md`. Each line is one item; use its rule as the id."
-            : "The review findings are in `out/pipeline/review.md`. If it says `No findings.`, write that to `out/pipeline/fixes.md` and stop.",
+    // The review fixes its own findings, so fix only runs for a gate failure.
+    enter("fix");
+    if (progress.done.includes("fix")) tui.skip("fix", "done in an earlier run");
+    else if (progress.gated !== true) await skipStep("fix", "the review fixed its findings");
+    else
+      await phase("fix", "Sonnet", async () => {
+        await step("fix", "fix", SONNET, "fix.md", {
+          TASK: "The PR was not published: the run broke the gate rules in `out/pipeline/gate.md`. Each line is one item; use its rule as the id.",
+        });
       });
-    });
 
     enter("check");
     if (progress.done.includes("check")) tui.skip("check", "done in an earlier run");

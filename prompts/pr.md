@@ -14,9 +14,9 @@ Commits:
 3. Use the `/pr` skill to write the body to `out/pipeline/pr-body.md`. Add:
    - `Closes #{{ISSUE_NUMBER}}` near the top.
    - A `## Calls made` section, if the commits record calls the agent made that the issue left open (design, art, placement): each one and what was chosen.
-   - A `## Review` section: each finding that was fixed, from `fixes.md`.
+   - A `## Review` section: each finding the review fixed, from `review.md`, and each item fixed after it, from `fixes.md`.
    - A `## Out of scope` section, if any finding is **won't fix**: each one with its reason, and the `#N` the review named, if any.
-   - A `## Skipped` section, if the fix step skipped any finding: each one with what it found.
+   - A `## Skipped` section, if the review or a later fix skipped any finding: each one with what it found.
    - Last line: `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
      Reference each picked file by its path from the repo root: `![what it shows](./{{EVIDENCE}}/<path>)`.
      Confirm every claim about the code with a search (`git grep`, `git diff`) before writing it.

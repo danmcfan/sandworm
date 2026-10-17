@@ -3,7 +3,7 @@
 The [Sandcastle](https://github.com/ai-hero/sandcastle) pipeline shared by danmcfan's repos: one issue in, one PR out.
 
 ```
-feedback → setup → implement (Opus) → review (Opus) → fix (Sonnet) → check, refixing up to 3× → stack → PR body (Sonnet) → gate, back to fix once → publish
+feedback → setup → implement (Opus) → review, fixing its findings (Opus) → check, refixing up to 3× → stack → PR body (Sonnet) → gate, back to fix (Sonnet) once → publish
 ```
 
 A repo runs it with `bun run sandcastle [issue] [--fresh]`, or over many issues with
